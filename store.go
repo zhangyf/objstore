@@ -64,3 +64,13 @@ type Store interface {
 	// Provider 返回存储类型
 	Provider() ProviderType
 }
+
+// ServerCopier 服务端对象复制接口，COS 和 S3 均实现。
+// 调用方通过类型断言判断是否可用，可用时走服务端复制（不过本机带宽）。
+type ServerCopier interface {
+	// CopyPartFrom 将 src 的 srcKey 以服务端分块复制到自身的 dstKey。
+	// onChunkDone 每完成一个分块后回调已传输字节数，可用于进度统计。
+	CopyPartFrom(ctx context.Context, dstKey string, src ServerCopier,
+		srcKey string, totalSize, chunkSize int64, concurrency int,
+		onChunkDone func(int64)) error
+}

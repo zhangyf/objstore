@@ -287,3 +287,102 @@ func (s *s3Store) CopyObject(ctx context.Context, srcKey, dstKey string) error {
 	})
 	return err
 }
+
+// CopyPartFrom 使用服务端 UploadPartCopy 跨桶/同桶复制大文件（不过本机带宽）。
+func (s *s3Store) CopyPartFrom(ctx context.Context, dstKey string, src ServerCopier,
+	srcKey string, totalSize, chunkSize int64, concurrency int, onChunkDone func(int64)) error {
+
+	srcS3, ok := src.(*s3Store)
+	if !ok {
+		return fmt.Errorf("S3 CopyPartFrom: src must also be an S3 store")
+	}
+
+	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
+	copySource := fmt.Sprintf("%s/%s", srcS3.bucket, srcKey)
+
+	createResp, err := s.inner.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(dstKey),
+	})
+	if err != nil {
+		return fmt.Errorf("S3 CreateMultipartUpload: %w", err)
+	}
+	uploadID := aws.ToString(createResp.UploadId)
+	abort := func() {
+		s.inner.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+			Bucket: aws.String(s.bucket), Key: aws.String(dstKey), UploadId: aws.String(uploadID),
+		})
+	}
+
+	type partResult struct {
+		pn   int
+		etag string
+		err  error
+	}
+	jobs := make(chan int, concurrency*2)
+	results := make(chan partResult, totalParts)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for pn := range jobs {
+				start := int64(pn-1) * chunkSize
+				end := start + chunkSize - 1
+				if end >= totalSize {
+					end = totalSize - 1
+				}
+				resp, err := s.inner.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+					Bucket:          aws.String(s.bucket),
+					Key:             aws.String(dstKey),
+					UploadId:        aws.String(uploadID),
+					PartNumber:      aws.Int32(int32(pn)),
+					CopySource:      aws.String(copySource),
+					CopySourceRange: aws.String(fmt.Sprintf("bytes=%d-%d", start, end)),
+				})
+				if err != nil {
+					results <- partResult{pn, "", fmt.Errorf("UploadPartCopy %d: %w", pn, err)}
+					continue
+				}
+				if onChunkDone != nil {
+					onChunkDone(end - start + 1)
+				}
+				log.Printf("[S3 CopyPart] part %d/%d done", pn, totalParts)
+				results <- partResult{pn, aws.ToString(resp.CopyPartResult.ETag), nil}
+			}
+		}()
+	}
+	go func() {
+		for i := 1; i <= totalParts; i++ {
+			jobs <- i
+		}
+		close(jobs)
+	}()
+	go func() { wg.Wait(); close(results) }()
+
+	var parts []s3types.CompletedPart
+	for r := range results {
+		if r.err != nil {
+			abort()
+			return r.err
+		}
+		parts = append(parts, s3types.CompletedPart{
+			PartNumber: aws.Int32(int32(r.pn)),
+			ETag:       aws.String(r.etag),
+		})
+	}
+	sort.Slice(parts, func(i, j int) bool {
+		return aws.ToInt32(parts[i].PartNumber) < aws.ToInt32(parts[j].PartNumber)
+	})
+	_, err = s.inner.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(s.bucket),
+		Key:             aws.String(dstKey),
+		UploadId:        aws.String(uploadID),
+		MultipartUpload: &s3types.CompletedMultipartUpload{Parts: parts},
+	})
+	if err != nil {
+		abort()
+		return fmt.Errorf("S3 CompleteMultipartUpload: %w", err)
+	}
+	return nil
+}
