@@ -48,7 +48,7 @@ func newS3Store(cfg Config) (Store, error) {
 	}, nil
 }
 
-func (s *s3Store) Provider() string   { return "s3" }
+func (s *s3Store) Provider() ProviderType { return ProviderS3 }
 func (s *s3Store) BucketName() string { return s.bucket }
 
 // ---- 元信息 ----

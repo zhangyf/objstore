@@ -34,7 +34,7 @@ func newCOSStore(cfg Config) (Store, error) {
 	return &cosStore{inner: inner, bucket: cfg.Bucket, region: cfg.Region}, nil
 }
 
-func (c *cosStore) Provider() string    { return "cos" }
+func (c *cosStore) Provider() ProviderType { return ProviderCOS }
 func (c *cosStore) BucketName() string  { return c.bucket }
 
 // ---- 元信息 ----

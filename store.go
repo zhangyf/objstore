@@ -61,6 +61,6 @@ type Store interface {
 	// BucketName 返回桶名，用于日志
 	BucketName() string
 
-	// Provider 返回存储类型，"cos" 或 "s3"
-	Provider() string
+	// Provider 返回存储类型
+	Provider() ProviderType
 }

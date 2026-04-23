@@ -5,9 +5,17 @@ import (
 	"fmt"
 )
 
+// ProviderType 存储提供商类型
+type ProviderType string
+
+const (
+	ProviderCOS ProviderType = "cos"
+	ProviderS3  ProviderType = "s3"
+)
+
 // Config 统一存储配置
 type Config struct {
-	Provider  string // "cos" 或 "s3"
+	Provider  ProviderType
 	Bucket    string
 	Region    string
 	SecretID  string // COS SecretId / S3 Access Key ID
@@ -18,25 +26,30 @@ type Config struct {
 // New 根据 Config 创建对应的 Store 实现
 func New(cfg Config) (Store, error) {
 	switch cfg.Provider {
-	case "cos":
+	case ProviderCOS:
 		return newCOSStore(cfg)
-	case "s3":
+	case ProviderS3:
 		return newS3Store(cfg)
 	default:
-		return nil, fmt.Errorf("objstore: unknown provider %q, want cos or s3", cfg.Provider)
+		return nil, fmt.Errorf("objstore: unknown provider %q, want %q or %q", cfg.Provider, ProviderCOS, ProviderS3)
 	}
 }
 
-// CopyPartFrom COS→COS 服务端分块复制大文件（不过本机带宽）。
-// src/dst 必须都是 COS Store，否则返回 error。
-func CopyPartFrom(ctx context.Context, dst, src Store,
-	dstKey, srcKey string, totalSize, chunkSize int64, concurrency int,
-	onChunkDone func(int64)) error {
-
-	dstCOS, ok1 := dst.(*cosStore)
-	srcCOS, ok2 := src.(*cosStore)
-	if !ok1 || !ok2 {
-		return fmt.Errorf("objstore.CopyPartFrom: both src and dst must be COS stores")
+// IsCOSStore 判断 Store 是否为 COS 实现，是则返回内部 cosStore 供跨包调用
+// 仅供 objcli 等上层工具做 COS→COS 服务端复制时使用
+func IsCOSStore(s Store) (*COSStore, bool) {
+	c, ok := s.(*cosStore)
+	if !ok {
+		return nil, false
 	}
-	return dstCOS.CopyPartFrom(ctx, dstKey, srcCOS, srcKey, totalSize, chunkSize, concurrency, onChunkDone)
+	return (*COSStore)(c), true
+}
+
+// COSStore 是对外暴露的 COS store 句柄，仅用于 CopyPartFrom
+type COSStore cosStore
+
+// CopyPartFrom 服务端分块复制（不过本机带宽），仅 COS→COS 可用
+func (dst *COSStore) CopyPartFrom(ctx context.Context, dstKey string, src *COSStore,
+	srcKey string, totalSize, chunkSize int64, concurrency int, onChunkDone func(int64)) error {
+	return (*cosStore)(dst).CopyPartFrom(ctx, dstKey, (*cosStore)(src), srcKey, totalSize, chunkSize, concurrency, onChunkDone)
 }
