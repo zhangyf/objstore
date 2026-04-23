@@ -23,7 +23,7 @@ type cosStore struct {
 }
 
 func newCOSStore(cfg Config) (Store, error) {
-	u, err := url.Parse(fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cfg.Bucket, cfg.Region))
+	u, err := url.Parse(fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn", cfg.Bucket, cfg.Region))
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +221,7 @@ func (c *cosStore) CopyObject(ctx context.Context, dstKey string, src ServerCopi
 	if !ok {
 		return fmt.Errorf("COS CopyObject: src must also be a COS store")
 	}
-	srcURL := fmt.Sprintf("%s.cos.%s.myqcloud.com/%s", srcStore.bucket, srcStore.region, srcKey)
+	srcURL := fmt.Sprintf("%s.cos-internal.%s.tencentcos.cn/%s", srcStore.bucket, srcStore.region, srcKey)
 	_, _, err := c.inner.Object.Copy(ctx, dstKey, srcURL, nil)
 	return err
 }
@@ -237,7 +237,7 @@ func (c *cosStore) CopyPartFrom(ctx context.Context, dstKey string, src ServerCo
 	}
 
 	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
-	srcURL := fmt.Sprintf("%s.cos.%s.myqcloud.com/%s", srcStore.bucket, srcStore.region, srcKey)
+	srcURL := fmt.Sprintf("%s.cos-internal.%s.tencentcos.cn/%s", srcStore.bucket, srcStore.region, srcKey)
 
 	initResp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, dstKey, nil)
 	if err != nil {
