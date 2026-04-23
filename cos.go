@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"time"
 	"sort"
 	"sync"
 
@@ -30,6 +31,11 @@ func newCOSStore(cfg Config) (Store, error) {
 		Transport: &cos.AuthorizationTransport{
 			SecretID:  cfg.SecretID,
 			SecretKey: cfg.SecretKey,
+			Transport: &http.Transport{
+				MaxIdleConns:        200,
+				MaxIdleConnsPerHost: 100,
+				IdleConnTimeout:     90 * time.Second,
+			},
 		},
 	})
 	return &cosStore{inner: inner, bucket: cfg.Bucket, region: cfg.Region}, nil
