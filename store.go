@@ -55,9 +55,6 @@ type Store interface {
 	// DeleteObject 删除对象
 	DeleteObject(ctx context.Context, key string) error
 
-	// CopyObject 同桶内复制（服务端）
-	CopyObject(ctx context.Context, srcKey, dstKey string) error
-
 	// BucketName 返回桶名，用于日志
 	BucketName() string
 
@@ -68,7 +65,10 @@ type Store interface {
 // ServerCopier 服务端对象复制接口，COS 和 S3 均实现。
 // 调用方通过类型断言判断是否可用，可用时走服务端复制（不过本机带宽）。
 type ServerCopier interface {
-	// CopyPartFrom 将 src 的 srcKey 以服务端分块复制到自身的 dstKey。
+	// CopyObject 小文件单次服务端复制，适合不超过分块阈値的对象。
+	CopyObject(ctx context.Context, dstKey string, src ServerCopier, srcKey string) error
+
+	// CopyPartFrom 大文件服务端分块复制。
 	// onChunkDone 每完成一个分块后回调已传输字节数，可用于进度统计。
 	CopyPartFrom(ctx context.Context, dstKey string, src ServerCopier,
 		srcKey string, totalSize, chunkSize int64, concurrency int,

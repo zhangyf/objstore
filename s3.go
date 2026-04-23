@@ -279,11 +279,15 @@ func (s *s3Store) DeleteObject(ctx context.Context, key string) error {
 	return err
 }
 
-func (s *s3Store) CopyObject(ctx context.Context, srcKey, dstKey string) error {
+func (s *s3Store) CopyObject(ctx context.Context, dstKey string, src ServerCopier, srcKey string) error {
+	srcStore, ok := src.(*s3Store)
+	if !ok {
+		return fmt.Errorf("S3 CopyObject: src must also be an S3 store")
+	}
 	_, err := s.inner.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(s.bucket),
 		Key:        aws.String(dstKey),
-		CopySource: aws.String(s.bucket + "/" + srcKey),
+		CopySource: aws.String(srcStore.bucket + "/" + srcKey),
 	})
 	return err
 }

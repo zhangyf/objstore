@@ -210,8 +210,12 @@ func (c *cosStore) DeleteObject(ctx context.Context, key string) error {
 	return err
 }
 
-func (c *cosStore) CopyObject(ctx context.Context, srcKey, dstKey string) error {
-	srcURL := fmt.Sprintf("%s.cos.%s.myqcloud.com/%s", c.bucket, c.region, srcKey)
+func (c *cosStore) CopyObject(ctx context.Context, dstKey string, src ServerCopier, srcKey string) error {
+	srcStore, ok := src.(*cosStore)
+	if !ok {
+		return fmt.Errorf("COS CopyObject: src must also be a COS store")
+	}
+	srcURL := fmt.Sprintf("%s.cos.%s.myqcloud.com/%s", srcStore.bucket, srcStore.region, srcKey)
 	_, _, err := c.inner.Object.Copy(ctx, dstKey, srcURL, nil)
 	return err
 }
