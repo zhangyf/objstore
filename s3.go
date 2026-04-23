@@ -1,0 +1,289 @@
+package objstore
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"log"
+	"sort"
+	"sync"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+)
+
+type s3Store struct {
+	inner  *s3.Client
+	bucket string
+	region string
+}
+
+func newS3Store(cfg Config) (Store, error) {
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+		awsconfig.WithRegion(cfg.Region),
+		awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(cfg.SecretID, cfg.SecretKey, ""),
+		),
+		awsconfig.WithClientLogMode(0),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("s3 config: %w", err)
+	}
+	var opts []func(*s3.Options)
+	if cfg.Endpoint != "" {
+		ep := cfg.Endpoint
+		opts = append(opts, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(ep)
+			o.UsePathStyle = true
+		})
+	}
+	return &s3Store{
+		inner:  s3.NewFromConfig(awsCfg, opts...),
+		bucket: cfg.Bucket,
+		region: cfg.Region,
+	}, nil
+}
+
+func (s *s3Store) Provider() string   { return "s3" }
+func (s *s3Store) BucketName() string { return s.bucket }
+
+// ---- 元信息 ----
+
+func (s *s3Store) HeadObject(ctx context.Context, key string) (int64, error) {
+	resp, err := s.inner.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return 0, err
+	}
+	if resp.ContentLength == nil {
+		return 0, nil
+	}
+	return *resp.ContentLength, nil
+}
+
+func (s *s3Store) ListObjects(ctx context.Context, prefix string) ([]string, error) {
+	infos, err := s.ListObjectsWithSize(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, len(infos))
+	for i, o := range infos {
+		keys[i] = o.Key
+	}
+	return keys, nil
+}
+
+func (s *s3Store) ListObjectsWithSize(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	var result []ObjectInfo
+	var token *string
+	for {
+		resp, err := s.inner.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("s3 ListObjectsV2: %w", err)
+		}
+		for _, obj := range resp.Contents {
+			sz := int64(0)
+			if obj.Size != nil {
+				sz = *obj.Size
+			}
+			result = append(result, ObjectInfo{Key: aws.ToString(obj.Key), Size: sz})
+		}
+		if !aws.ToBool(resp.IsTruncated) {
+			break
+		}
+		token = resp.NextContinuationToken
+	}
+	return result, nil
+}
+
+// ---- 下载 ----
+
+func (s *s3Store) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
+	resp, err := s.inner.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+func (s *s3Store) GetRange(ctx context.Context, key string, start, end int64) ([]byte, error) {
+	resp, err := s.inner.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", start, end)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+func (s *s3Store) GetAll(ctx context.Context, key string) ([]byte, error) {
+	resp, err := s.inner.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+// ---- 上传 ----
+
+func (s *s3Store) PutObject(ctx context.Context, key string, data []byte) error {
+	_, err := s.inner.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(data),
+	})
+	return err
+}
+
+func (s *s3Store) PutObjectStream(ctx context.Context, key string, r io.Reader, size int64) error {
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+		Body:   r,
+	}
+	if size >= 0 {
+		input.ContentLength = aws.Int64(size)
+	}
+	_, err := s.inner.PutObject(ctx, input)
+	return err
+}
+
+// ---- 分块上传 ----
+
+func (s *s3Store) MultipartUpload(ctx context.Context, key string, totalSize, chunkSize int64, concurrency int,
+	fetchPart func(partNumber int, offset, size int64) ([]byte, error)) error {
+
+	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
+	createResp, err := s.inner.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("CreateMultipartUpload: %w", err)
+	}
+	uploadID := aws.ToString(createResp.UploadId)
+	abort := func() {
+		s.inner.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+			Bucket: aws.String(s.bucket), Key: aws.String(key), UploadId: aws.String(uploadID),
+		})
+	}
+
+	type partResult struct {
+		pn   int
+		etag string
+		err  error
+	}
+	jobs := make(chan int, concurrency*2)
+	results := make(chan partResult, totalParts)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for pn := range jobs {
+				offset := int64(pn-1) * chunkSize
+				sz := chunkSize
+				if offset+sz > totalSize {
+					sz = totalSize - offset
+				}
+				data, err := fetchPart(pn, offset, sz)
+				if err != nil {
+					results <- partResult{pn, "", fmt.Errorf("fetchPart %d: %w", pn, err)}
+					continue
+				}
+				resp, err := s.inner.UploadPart(ctx, &s3.UploadPartInput{
+					Bucket:     aws.String(s.bucket),
+					Key:        aws.String(key),
+					UploadId:   aws.String(uploadID),
+					PartNumber: aws.Int32(int32(pn)),
+					Body:       bytes.NewReader(data),
+				})
+				if err != nil {
+					results <- partResult{pn, "", fmt.Errorf("UploadPart %d: %w", pn, err)}
+					continue
+				}
+				log.Printf("[S3 multipart] part %d/%d done", pn, totalParts)
+				results <- partResult{pn, aws.ToString(resp.ETag), nil}
+			}
+		}()
+	}
+	go func() {
+		for i := 1; i <= totalParts; i++ {
+			jobs <- i
+		}
+		close(jobs)
+	}()
+	go func() { wg.Wait(); close(results) }()
+
+	type pr struct {
+		pn   int
+		etag string
+	}
+	var parts []pr
+	for r := range results {
+		if r.err != nil {
+			abort()
+			return r.err
+		}
+		parts = append(parts, pr{r.pn, r.etag})
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].pn < parts[j].pn })
+
+	s3Parts := make([]s3types.CompletedPart, len(parts))
+	for i, p := range parts {
+		s3Parts[i] = s3types.CompletedPart{
+			PartNumber: aws.Int32(int32(p.pn)),
+			ETag:       aws.String(p.etag),
+		}
+	}
+	_, err = s.inner.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(s.bucket),
+		Key:             aws.String(key),
+		UploadId:        aws.String(uploadID),
+		MultipartUpload: &s3types.CompletedMultipartUpload{Parts: s3Parts},
+	})
+	if err != nil {
+		abort()
+		return fmt.Errorf("CompleteMultipartUpload: %w", err)
+	}
+	return nil
+}
+
+// ---- 其他 ----
+
+func (s *s3Store) DeleteObject(ctx context.Context, key string) error {
+	_, err := s.inner.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	return err
+}
+
+func (s *s3Store) CopyObject(ctx context.Context, srcKey, dstKey string) error {
+	_, err := s.inner.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     aws.String(s.bucket),
+		Key:        aws.String(dstKey),
+		CopySource: aws.String(s.bucket + "/" + srcKey),
+	})
+	return err
+}
