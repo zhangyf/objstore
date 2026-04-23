@@ -217,8 +217,13 @@ func (c *cosStore) CopyObject(ctx context.Context, srcKey, dstKey string) error 
 
 // CopyPartFrom 使用服务端 UploadPart-Copy 跨桶/同桶复制大文件（不过本机带宽）
 // srcStore 必须也是 cosStore；onChunkDone 每完成一个分块后回调已传输字节数
-func (c *cosStore) CopyPartFrom(ctx context.Context, dstKey string, srcStore *cosStore, srcKey string,
+func (c *cosStore) CopyPartFrom(ctx context.Context, dstKey string, src COSCopier, srcKey string,
 	totalSize, chunkSize int64, concurrency int, onChunkDone func(int64)) error {
+
+	srcStore, ok := src.(*cosStore)
+	if !ok {
+		return fmt.Errorf("CopyPartFrom: src must be a COS store")
+	}
 
 	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
 	srcURL := fmt.Sprintf("%s.cos.%s.myqcloud.com/%s", srcStore.bucket, srcStore.region, srcKey)
