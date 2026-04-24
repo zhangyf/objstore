@@ -8,8 +8,10 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"time"
+	"os"
 	"sort"
+	"strings"
+	"time"
 	"sync"
 
 	cos "github.com/tencentyun/cos-go-sdk-v5"
@@ -22,10 +24,58 @@ type cosStore struct {
 	region string
 }
 
+// logOperation 记录操作日志，根据 Debug 标志决定是否输出
+func (c *cosStore) logOperation(op, key string, extra ...string) {
+	if !COSDebug {
+		return // 调试模式关闭时不记录详细操作
+	}
+	
+	// 生成完整 URL
+	var fullURL string
+	if key == "" && (op == "ListObjects" || op == "ListObjectsWithSize") {
+		// 对于列表操作，不显示 key，但可以显示 base URL
+		fullURL = fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn/", c.bucket, c.region)
+	} else if key == "" {
+		// 没有 key 的情况
+		fullURL = fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn/", c.bucket, c.region)
+	} else {
+		// 有 key 的情况，构建完整对象 URL
+		fullURL = fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn/%s", c.bucket, c.region, key)
+	}
+	
+	msg := fmt.Sprintf("[objstore] DEBUG %s: URL=%s, bucket=%s, region=%s, key=%s", op, fullURL, c.bucket, c.region, key)
+	if len(extra) > 0 {
+		msg += ", " + strings.Join(extra, ", ")
+	}
+	if strings.HasPrefix(msg, "[objstore] DEBUG") && !COSDebug {
+		return
+	}
+	log.Printf(msg)
+}
+
+// COSDebug 控制是否开启详细的操作日志（URL、参数等）
+var COSDebug = false
+
+// SetDebug 设置调试模式
+func SetDebug(debug bool) {
+	COSDebug = debug
+}
+
+func init() {
+	// 从环境变量初始化调试模式
+	if os.Getenv("OBJSTORE_DEBUG") == "true" || os.Getenv("COS_DEBUG") == "true" {
+		COSDebug = true
+		log.Printf("[objstore] DEBUG 模式已启用")
+	}
+}
+
 func newCOSStore(cfg Config) (Store, error) {
 	u, err := url.Parse(fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn", cfg.Bucket, cfg.Region))
 	if err != nil {
 		return nil, err
+	}
+	if COSDebug {
+		log.Printf("[objstore] DEBUG New COS Client: endpoint=%s", u.String())
 	}
 	inner := cos.NewClient(&cos.BaseURL{BucketURL: u}, &http.Client{
 		Transport: &cos.AuthorizationTransport{
@@ -47,6 +97,7 @@ func (c *cosStore) BucketName() string  { return c.bucket }
 // ---- 元信息 ----
 
 func (c *cosStore) HeadObject(ctx context.Context, key string) (int64, error) {
+	c.logOperation("HeadObject", key)
 	resp, err := c.inner.Object.Head(ctx, key, nil)
 	if err != nil {
 		return 0, err
@@ -55,6 +106,7 @@ func (c *cosStore) HeadObject(ctx context.Context, key string) (int64, error) {
 }
 
 func (c *cosStore) ListObjects(ctx context.Context, prefix string) ([]string, error) {
+	c.logOperation("ListObjects", "", "prefix="+prefix)
 	infos, err := c.ListObjectsWithSize(ctx, prefix)
 	if err != nil {
 		return nil, err
@@ -67,6 +119,7 @@ func (c *cosStore) ListObjects(ctx context.Context, prefix string) ([]string, er
 }
 
 func (c *cosStore) ListObjectsWithSize(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	c.logOperation("ListObjectsWithSize", "", "prefix="+prefix)
 	var result []ObjectInfo
 	marker := ""
 	for {
@@ -92,6 +145,7 @@ func (c *cosStore) ListObjectsWithSize(ctx context.Context, prefix string) ([]Ob
 // ---- 下载 ----
 
 func (c *cosStore) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
+	c.logOperation("GetObject", key)
 	resp, err := c.inner.Object.Get(ctx, key, nil)
 	if err != nil {
 		return nil, err
@@ -100,6 +154,7 @@ func (c *cosStore) GetObject(ctx context.Context, key string) (io.ReadCloser, er
 }
 
 func (c *cosStore) GetRange(ctx context.Context, key string, start, end int64) ([]byte, error) {
+	c.logOperation("GetRange", key, fmt.Sprintf("range=%d-%d", start, end))
 	resp, err := c.inner.Object.Get(ctx, key, &cos.ObjectGetOptions{
 		Range: fmt.Sprintf("bytes=%d-%d", start, end),
 	})
@@ -111,6 +166,7 @@ func (c *cosStore) GetRange(ctx context.Context, key string, start, end int64) (
 }
 
 func (c *cosStore) GetAll(ctx context.Context, key string) ([]byte, error) {
+	c.logOperation("GetAll", key)
 	resp, err := c.inner.Object.Get(ctx, key, nil)
 	if err != nil {
 		return nil, err
@@ -122,11 +178,13 @@ func (c *cosStore) GetAll(ctx context.Context, key string) ([]byte, error) {
 // ---- 上传 ----
 
 func (c *cosStore) PutObject(ctx context.Context, key string, data []byte) error {
+	c.logOperation("PutObject", key, fmt.Sprintf("size=%d", len(data)))
 	_, err := c.inner.Object.Put(ctx, key, bytes.NewReader(data), nil)
 	return err
 }
 
 func (c *cosStore) PutObjectStream(ctx context.Context, key string, r io.Reader, size int64) error {
+	c.logOperation("PutObjectStream", key, fmt.Sprintf("size=%d", size))
 	opt := &cos.ObjectPutOptions{}
 	if size >= 0 {
 		opt.ObjectPutHeaderOptions = &cos.ObjectPutHeaderOptions{
@@ -178,7 +236,9 @@ func (c *cosStore) MultipartUpload(ctx context.Context, key string, totalSize, c
 					results <- partResult{pn, "", fmt.Errorf("UploadPart %d: %w", pn, err)}
 					continue
 				}
-				log.Printf("[COS multipart] part %d/%d done", pn, totalParts)
+				if COSDebug {
+					log.Printf("[objstore] DEBUG [COS multipart] part %d/%d done", pn, totalParts)
+				}
 				results <- partResult{pn, resp.Header.Get("ETag"), nil}
 			}
 		}()
@@ -212,6 +272,7 @@ func (c *cosStore) MultipartUpload(ctx context.Context, key string, totalSize, c
 // ---- 其他 ----
 
 func (c *cosStore) DeleteObject(ctx context.Context, key string) error {
+	c.logOperation("DeleteObject", key)
 	_, err := c.inner.Object.Delete(ctx, key)
 	return err
 }
@@ -222,6 +283,7 @@ func (c *cosStore) CopyObject(ctx context.Context, dstKey string, src ServerCopi
 		return fmt.Errorf("COS CopyObject: src must also be a COS store")
 	}
 	srcURL := fmt.Sprintf("%s.cos-internal.%s.tencentcos.cn/%s", srcStore.bucket, srcStore.region, srcKey)
+	c.logOperation("CopyObject", dstKey, fmt.Sprintf("src=%s", srcURL))
 	_, _, err := c.inner.Object.Copy(ctx, dstKey, srcURL, nil)
 	return err
 }
@@ -238,6 +300,7 @@ func (c *cosStore) CopyPartFrom(ctx context.Context, dstKey string, src ServerCo
 
 	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
 	srcURL := fmt.Sprintf("%s.cos-internal.%s.tencentcos.cn/%s", srcStore.bucket, srcStore.region, srcKey)
+	c.logOperation("CopyPartFrom", dstKey, fmt.Sprintf("src=%s, totalSize=%d, chunks=%d", srcURL, totalSize, totalParts))
 
 	initResp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, dstKey, nil)
 	if err != nil {
@@ -276,7 +339,9 @@ func (c *cosStore) CopyPartFrom(ctx context.Context, dstKey string, src ServerCo
 				if onChunkDone != nil {
 					onChunkDone(end - start + 1)
 				}
-				log.Printf("[COS CopyPart] part %d/%d done", pn, totalParts)
+				if COSDebug {
+					log.Printf("[objstore] DEBUG [COS CopyPart] part %d/%d done", pn, totalParts)
+				}
 				results <- partResult{pn, resp.ETag, nil}
 			}
 		}()
