@@ -54,18 +54,24 @@ func (s *s3Store) BucketName() string { return s.bucket }
 
 // ---- 元信息 ----
 
-func (s *s3Store) HeadObject(ctx context.Context, key string) (int64, error) {
+func (s *s3Store) HeadObject(ctx context.Context, key string) (*ObjectInfo, error) {
 	resp, err := s.inner.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	if resp.ContentLength == nil {
-		return 0, nil
+	info := &ObjectInfo{Key: key}
+	if resp.ContentLength != nil {
+		info.Size = *resp.ContentLength
 	}
-	return *resp.ContentLength, nil
+	if resp.LastModified != nil {
+		info.LastModified = *resp.LastModified
+	}
+	info.ETag = aws.ToString(resp.ETag)
+	info.StorageClass = string(resp.StorageClass)
+	return info, nil
 }
 
 func (s *s3Store) ListObjects(ctx context.Context, prefix string) ([]string, error) {

@@ -8,16 +8,19 @@ import (
 
 // ObjectInfo 对象元信息
 type ObjectInfo struct {
-	Key  string
-	Size int64
+	Key          string
+	Size         int64
+	ETag         string
+	LastModified time.Time
+	StorageClass string
 }
 
 // Store 统一对象存储接口，COS / S3 各自实现
 type Store interface {
 	// --- 元信息 ---
 
-	// HeadObject 获取对象大小
-	HeadObject(ctx context.Context, key string) (int64, error)
+	// HeadObject 获取对象元信息
+	HeadObject(ctx context.Context, key string) (*ObjectInfo, error)
 
 	// ListObjects 列出指定前缀下所有对象 Key（不含 size）
 	ListObjects(ctx context.Context, prefix string) ([]string, error)

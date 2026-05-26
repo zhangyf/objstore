@@ -98,13 +98,22 @@ func (c *cosStore) BucketName() string  { return c.bucket }
 
 // ---- 元信息 ----
 
-func (c *cosStore) HeadObject(ctx context.Context, key string) (int64, error) {
+func (c *cosStore) HeadObject(ctx context.Context, key string) (*ObjectInfo, error) {
 	c.logOperation("HeadObject", key)
 	resp, err := c.inner.Object.Head(ctx, key, nil)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return resp.ContentLength, nil
+	info := &ObjectInfo{Key: key, Size: resp.ContentLength}
+	if resp.Header != nil {
+		if lmStr := resp.Header.Get("Last-Modified"); lmStr != "" {
+			lm, _ := time.Parse(time.RFC1123, lmStr)
+			info.LastModified = lm
+		}
+		info.ETag = strings.Trim(resp.Header.Get("ETag"), "\"")
+		info.StorageClass = resp.Header.Get("x-cos-storage-class")
+	}
+	return info, nil
 }
 
 func (c *cosStore) ListObjects(ctx context.Context, prefix string) ([]string, error) {
