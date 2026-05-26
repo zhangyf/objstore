@@ -11,17 +11,19 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"time"
 	"sync"
+	"time"
 
 	cos "github.com/tencentyun/cos-go-sdk-v5"
 )
 
 
 type cosStore struct {
-	inner  *cos.Client
-	bucket string
-	region string
+	inner     *cos.Client
+	bucket    string
+	region    string
+	secretID  string
+	secretKey string
 }
 
 // logOperation 记录操作日志，根据 Debug 标志决定是否输出
@@ -50,7 +52,7 @@ func (c *cosStore) logOperation(op, key string, extra ...string) {
 	if strings.HasPrefix(msg, "[objstore] DEBUG") && !COSDebug {
 		return
 	}
-	log.Printf(msg)
+	log.Print(msg)
 }
 
 // COSDebug 控制是否开启详细的操作日志（URL、参数等）
@@ -88,7 +90,7 @@ func newCOSStore(cfg Config) (Store, error) {
 			},
 		},
 	})
-	return &cosStore{inner: inner, bucket: cfg.Bucket, region: cfg.Region}, nil
+	return &cosStore{inner: inner, bucket: cfg.Bucket, region: cfg.Region, secretID: cfg.SecretID, secretKey: cfg.SecretKey}, nil
 }
 
 func (c *cosStore) Provider() ProviderType { return ProviderCOS }
@@ -267,6 +269,17 @@ func (c *cosStore) MultipartUpload(ctx context.Context, key string, totalSize, c
 		return fmt.Errorf("CompleteMultipartUpload: %w", err)
 	}
 	return nil
+}
+
+// ---- 预签名 URL ----
+
+func (c *cosStore) PresignGetObject(ctx context.Context, key string, expires time.Duration) (string, error) {
+	c.logOperation("PresignGetObject", key, fmt.Sprintf("expires=%s", expires))
+	u, err := c.inner.Object.GetPresignedURL(ctx, http.MethodGet, key, c.secretID, c.secretKey, expires, nil)
+	if err != nil {
+		return "", fmt.Errorf("cos PresignGetObject: %w", err)
+	}
+	return u.String(), nil
 }
 
 // ---- 其他 ----

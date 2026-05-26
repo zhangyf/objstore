@@ -3,6 +3,7 @@ package objstore
 import (
 	"context"
 	"io"
+	"time"
 )
 
 // ObjectInfo 对象元信息
@@ -49,6 +50,12 @@ type Store interface {
 	// fetchPart 回调按 offset/size 获取分块数据
 	MultipartUpload(ctx context.Context, key string, totalSize, chunkSize int64, concurrency int,
 		fetchPart func(partNumber int, offset, size int64) ([]byte, error)) error
+
+	// --- 预签名 URL ---
+
+	// PresignGetObject 生成 GET 对象的预签名 URL，调用方可直接通过该 URL 下载对象。
+	// expires 为 URL 有效期。
+	PresignGetObject(ctx context.Context, key string, expires time.Duration) (string, error)
 
 	// --- 其他 ---
 

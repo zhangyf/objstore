@@ -8,6 +8,7 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -267,6 +268,22 @@ func (s *s3Store) MultipartUpload(ctx context.Context, key string, totalSize, ch
 		return fmt.Errorf("CompleteMultipartUpload: %w", err)
 	}
 	return nil
+}
+
+// ---- 预签名 URL ----
+
+func (s *s3Store) PresignGetObject(ctx context.Context, key string, expires time.Duration) (string, error) {
+	presign := s3.NewPresignClient(s.inner)
+	req, err := presign.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}, func(po *s3.PresignOptions) {
+		po.Expires = expires
+	})
+	if err != nil {
+		return "", fmt.Errorf("s3 PresignGetObject: %w", err)
+	}
+	return req.URL, nil
 }
 
 // ---- 其他 ----
