@@ -282,6 +282,15 @@ func (c *cosStore) PresignGetObject(ctx context.Context, key string, expires tim
 	return u.String(), nil
 }
 
+func (c *cosStore) PresignPutObject(ctx context.Context, key string, expires time.Duration) (string, error) {
+	c.logOperation("PresignPutObject", key, fmt.Sprintf("expires=%s", expires))
+	u, err := c.inner.Object.GetPresignedURL(ctx, http.MethodPut, key, c.secretID, c.secretKey, expires, nil)
+	if err != nil {
+		return "", fmt.Errorf("cos PresignPutObject: %w", err)
+	}
+	return u.String(), nil
+}
+
 // ---- 其他 ----
 
 func (c *cosStore) DeleteObject(ctx context.Context, key string) error {

@@ -12,7 +12,7 @@
 - ✅ **服务端复制**：提供 `ServerCopier` 接口，跨桶/同桶复制走对象存储侧（不过本机带宽）
 - ✅ **内网优化**：COS 默认使用 `cos-internal.<region>.tencentcos.cn` 域名，走腾讯云内网链路
 - ✅ **S3 兼容**：通过 `Endpoint` 字段可对接任意 S3 兼容存储（MinIO 等），自动启用 path-style
-- ✅ **预签名 URL**：内置 GET 预签名，临时分发对象无需暴露密钥
+- ✅ **预签名 URL**：内置 GET / PUT 预签名，临时分发上传/下载无需暴露密钥
 - ✅ **可选调试日志**：通过 `OBJSTORE_DEBUG` / `COS_DEBUG` 环境变量或 `SetDebug()` 开启详细操作日志
 
 ## 安装
@@ -160,19 +160,21 @@ if copier, ok := dst.(objstore.ServerCopier); ok {
 
 | 方法 | COS | S3 | 说明 |
 |---|:---:|:---:|---|
-| `PresignGetObject(ctx, key, expires) (string, error)` | ✅ | ✅ | 生成 GET 对象的预签名 URL，调用方可直接通过该 URL 下载对象 |
+| `PresignGetObject(ctx, key, expires) (string, error)` | ✅ | ✅ | 生成 GET 预签名 URL，调用方可直接下载对象 |
+| `PresignPutObject(ctx, key, expires) (string, error)` | ✅ | ✅ | 生成 PUT 预签名 URL，调用方可直接通过 HTTP PUT 上传对象 |
 
 实现细节：
-- COS 使用 `cos-go-sdk-v5` 的 `Object.GetPresignedURL`，签名走 `SecretID/SecretKey`
-- S3 使用 `aws-sdk-go-v2` 的 `s3.NewPresignClient` + `PresignGetObject`
-- 可用于临时分发、跨服务下载、避免直接暴露密钥
+- COS 使用 `cos-go-sdk-v5` 的 `Object.GetPresignedURL`（method = GET / PUT），签名走 `SecretID/SecretKey`
+- S3 使用 `aws-sdk-go-v2` 的 `s3.NewPresignClient` + `PresignGetObject` / `PresignPutObject`
+- 适用于临时分发、跨服务上传/下载、避免直接暴露密钥
 
 ```go
-url, err := store.PresignGetObject(ctx, "path/to/object", 15*time.Minute)
-if err != nil {
-    log.Fatal(err)
-}
-log.Printf("download url: %s", url)
+// 下载预签名
+getURL, err := store.PresignGetObject(ctx, "path/to/object", 15*time.Minute)
+
+// 上传预签名
+putURL, err := store.PresignPutObject(ctx, "path/to/object", 15*time.Minute)
+// 客户端： curl -X PUT --upload-file local.bin "$putURL"
 ```
 
 ### 7. 删除
@@ -222,6 +224,7 @@ type Store interface {
 
     // 预签名 URL
     PresignGetObject(ctx context.Context, key string, expires time.Duration) (string, error)
+    PresignPutObject(ctx context.Context, key string, expires time.Duration) (string, error)
 
     // 删除
     DeleteObject(ctx context.Context, key string) error

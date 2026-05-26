@@ -57,6 +57,10 @@ type Store interface {
 	// expires 为 URL 有效期。
 	PresignGetObject(ctx context.Context, key string, expires time.Duration) (string, error)
 
+	// PresignPutObject 生成 PUT 对象的预签名 URL，调用方可直接通过该 URL 上传对象（HTTP PUT）。
+	// expires 为 URL 有效期。
+	PresignPutObject(ctx context.Context, key string, expires time.Duration) (string, error)
+
 	// --- 其他 ---
 
 	// DeleteObject 删除对象

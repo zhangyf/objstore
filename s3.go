@@ -286,6 +286,20 @@ func (s *s3Store) PresignGetObject(ctx context.Context, key string, expires time
 	return req.URL, nil
 }
 
+func (s *s3Store) PresignPutObject(ctx context.Context, key string, expires time.Duration) (string, error) {
+	presign := s3.NewPresignClient(s.inner)
+	req, err := presign.PresignPutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}, func(po *s3.PresignOptions) {
+		po.Expires = expires
+	})
+	if err != nil {
+		return "", fmt.Errorf("s3 PresignPutObject: %w", err)
+	}
+	return req.URL, nil
+}
+
 // ---- 其他 ----
 
 func (s *s3Store) DeleteObject(ctx context.Context, key string) error {
