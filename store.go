@@ -15,6 +15,12 @@ type ObjectInfo struct {
 	StorageClass string
 }
 
+// ListOptions 列表查询选项
+type ListOptions struct {
+	Prefix    string // 前缀路径
+	Delimiter string // 分隔符，默认 "/"；传 "" 则递归列出所有对象（不分组）
+}
+
 // Store 统一对象存储接口，COS / S3 各自实现
 type Store interface {
 	// --- 元信息 ---
@@ -22,11 +28,10 @@ type Store interface {
 	// HeadObject 获取对象元信息
 	HeadObject(ctx context.Context, key string) (*ObjectInfo, error)
 
-	// ListObjects 列出指定前缀下所有对象 Key（不含 size）
-	ListObjects(ctx context.Context, prefix string) ([]string, error)
-
-	// ListObjectsWithSize 列出指定前缀下所有对象，含 size
-	ListObjectsWithSize(ctx context.Context, prefix string) ([]ObjectInfo, error)
+	// ListObjects 列出指定前缀下的对象，含 size 等完整信息。
+	// 默认使用 "/" 作为分隔符（只列出当前层）。
+	// 如需递归列出所有对象，请设置 opts.Delimiter = ""。
+	ListObjects(ctx context.Context, opts ListOptions) ([]ObjectInfo, error)
 
 	// --- 下载 ---
 

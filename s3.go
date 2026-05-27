@@ -74,25 +74,20 @@ func (s *s3Store) HeadObject(ctx context.Context, key string) (*ObjectInfo, erro
 	return info, nil
 }
 
-func (s *s3Store) ListObjects(ctx context.Context, prefix string) ([]string, error) {
-	infos, err := s.ListObjectsWithSize(ctx, prefix)
-	if err != nil {
-		return nil, err
-	}
-	keys := make([]string, len(infos))
-	for i, o := range infos {
-		keys[i] = o.Key
-	}
-	return keys, nil
-}
-
-func (s *s3Store) ListObjectsWithSize(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+func (s *s3Store) ListObjects(ctx context.Context, opts ListOptions) ([]ObjectInfo, error) {
 	var result []ObjectInfo
 	var token *string
+
+	delimiter := aws.String("/")
+	if opts.Delimiter == "" {
+		delimiter = nil
+	}
+
 	for {
 		resp, err := s.inner.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(s.bucket),
-			Prefix:            aws.String(prefix),
+			Prefix:            aws.String(opts.Prefix),
+			Delimiter:         delimiter,
 			ContinuationToken: token,
 		})
 		if err != nil {
@@ -103,7 +98,17 @@ func (s *s3Store) ListObjectsWithSize(ctx context.Context, prefix string) ([]Obj
 			if obj.Size != nil {
 				sz = *obj.Size
 			}
-			result = append(result, ObjectInfo{Key: aws.ToString(obj.Key), Size: sz})
+			lm := time.Time{}
+			if obj.LastModified != nil {
+				lm = *obj.LastModified
+			}
+			result = append(result, ObjectInfo{
+				Key:          aws.ToString(obj.Key),
+				Size:         sz,
+				LastModified: lm,
+				ETag:         aws.ToString(obj.ETag),
+				StorageClass: string(obj.StorageClass),
+			})
 		}
 		if !aws.ToBool(resp.IsTruncated) {
 			break

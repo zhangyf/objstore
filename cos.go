@@ -3,6 +3,7 @@ package objstore
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log"
@@ -116,41 +117,194 @@ func (c *cosStore) HeadObject(ctx context.Context, key string) (*ObjectInfo, err
 	return info, nil
 }
 
-func (c *cosStore) ListObjects(ctx context.Context, prefix string) ([]string, error) {
-	c.logOperation("ListObjects", "", "prefix="+prefix)
-	infos, err := c.ListObjectsWithSize(ctx, prefix)
+func (c *cosStore) ListObjects(ctx context.Context, opts ListOptions) ([]ObjectInfo, error) {
+	c.logOperation("ListObjects", "", fmt.Sprintf("prefix=%s delimiter=%q", opts.Prefix, opts.Delimiter))
+
+	if opts.Delimiter == "" {
+		return c.listAllObjects(ctx, opts.Prefix)
+	}
+
+	return c.listWithDelimiter(ctx, opts.Prefix, opts.Delimiter)
+}
+
+// listWithDelimiter 按 delimiter 分层列出对象
+func (c *cosStore) listWithDelimiter(ctx context.Context, prefix string, delimiter string) ([]ObjectInfo, error) {
+	var result []ObjectInfo
+	marker := ""
+	baseURL := fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn", c.bucket, c.region)
+
+	for {
+		u, err := url.Parse(baseURL + "/")
+		if err != nil {
+			return nil, fmt.Errorf("ListObjects: URL 构造失败: %w", err)
+		}
+		q := u.Query()
+		q.Set("max-keys", "1000")
+		q.Set("prefix", prefix)
+		q.Set("delimiter", delimiter)
+		if marker != "" {
+			q.Set("marker", marker)
+		}
+		u.RawQuery = q.Encode()
+
+		body, err := c.listHTTPGet(ctx, u.String())
+		if err != nil {
+			return nil, err
+		}
+
+		type bucketListResult struct {
+			Contents       []struct {
+				Key          string `xml:"Key"`
+				Size         int64  `xml:"Size"`
+				ETag         string `xml:"ETag"`
+				LastModified string `xml:"LastModified"`
+				StorageClass string `xml:"StorageClass"`
+			} `xml:"Contents"`
+			CommonPrefixes []string `xml:"CommonPrefixes>Prefix"`
+			IsTruncated    bool     `xml:"IsTruncated"`
+			NextMarker     string   `xml:"NextMarker"`
+		}
+
+		var r bucketListResult
+		if err := xml.Unmarshal(body, &r); err != nil {
+			return nil, fmt.Errorf("ListObjects: 解析 XML 失败: %w", err)
+		}
+
+		for _, obj := range r.Contents {
+			result = append(result, c.parseObjectInfo(obj.Key, obj.Size, obj.ETag, obj.LastModified, obj.StorageClass))
+		}
+
+		if !r.IsTruncated {
+			break
+		}
+		marker = r.NextMarker
+	}
+
+	return result, nil
+}
+
+// listAllObjects 递归列出前缀下所有对象（遍历 CommonPrefixes）
+func (c *cosStore) listAllObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	var result []ObjectInfo
+	var prefixes []string
+	var err error
+
+	// 先列出当前层（含对象和子目录前缀）
+	prefixes, result, err = c.listWithCommonPrefixes(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
-	keys := make([]string, len(infos))
-	for i, o := range infos {
-		keys[i] = o.Key
+
+	// 递归遍历每个子目录
+	for _, subPrefix := range prefixes {
+		subResult, err := c.listAllObjects(ctx, subPrefix)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, subResult...)
 	}
-	return keys, nil
+
+	return result, nil
 }
 
-func (c *cosStore) ListObjectsWithSize(ctx context.Context, prefix string) ([]ObjectInfo, error) {
-	c.logOperation("ListObjectsWithSize", "", "prefix="+prefix)
+// listWithCommonPrefixes 列出一层，返回该层的对象列表和子目录前缀列表
+func (c *cosStore) listWithCommonPrefixes(ctx context.Context, prefix string) ([]string, []ObjectInfo, error) {
 	var result []ObjectInfo
+	var prefixes []string
 	marker := ""
+	baseURL := fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn", c.bucket, c.region)
+
 	for {
-		resp, _, err := c.inner.Bucket.Get(ctx, &cos.BucketGetOptions{
-			Prefix:  prefix,
-			Marker:  marker,
-			MaxKeys: 1000,
-		})
+		u, err := url.Parse(baseURL + "/")
 		if err != nil {
-			return nil, fmt.Errorf("cos ListObjects: %w", err)
+			return nil, nil, fmt.Errorf("ListObjects: URL 构造失败: %w", err)
 		}
-		for _, obj := range resp.Contents {
-			result = append(result, ObjectInfo{Key: obj.Key, Size: obj.Size})
+		q := u.Query()
+		q.Set("max-keys", "1000")
+		q.Set("prefix", prefix)
+		q.Set("delimiter", "/")
+		if marker != "" {
+			q.Set("marker", marker)
 		}
-		if !resp.IsTruncated {
+		u.RawQuery = q.Encode()
+
+		body, err := c.listHTTPGet(ctx, u.String())
+		if err != nil {
+			return nil, nil, err
+		}
+
+		type bucketListResult struct {
+			Contents       []struct {
+				Key          string `xml:"Key"`
+				Size         int64  `xml:"Size"`
+				ETag         string `xml:"ETag"`
+				LastModified string `xml:"LastModified"`
+				StorageClass string `xml:"StorageClass"`
+			} `xml:"Contents"`
+			CommonPrefixes []string `xml:"CommonPrefixes>Prefix"`
+			IsTruncated    bool     `xml:"IsTruncated"`
+			NextMarker     string   `xml:"NextMarker"`
+		}
+
+		var r bucketListResult
+		if err := xml.Unmarshal(body, &r); err != nil {
+			return nil, nil, fmt.Errorf("ListObjects: 解析 XML 失败: %w", err)
+		}
+
+		for _, obj := range r.Contents {
+			result = append(result, c.parseObjectInfo(obj.Key, obj.Size, obj.ETag, obj.LastModified, obj.StorageClass))
+		}
+		prefixes = append(prefixes, r.CommonPrefixes...)
+
+		if !r.IsTruncated {
 			break
 		}
-		marker = resp.NextMarker
+		marker = r.NextMarker
 	}
-	return result, nil
+
+	return prefixes, result, nil
+}
+
+// listHTTPGet 执行一次带签名的 HTTP GET 请求
+func (c *cosStore) listHTTPGet(ctx context.Context, urlStr string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ListObjects: 创建请求失败: %w", err)
+	}
+	httpClient := &http.Client{
+		Transport: &cos.AuthorizationTransport{
+			SecretID:  c.secretID,
+			SecretKey: c.secretKey,
+		},
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ListObjects: 请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("ListObjects: 读取响应失败: %w", err)
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("ListObjects: HTTP %d: prefix=%s", resp.StatusCode, urlStr)
+	}
+	return body, nil
+}
+
+func (c *cosStore) parseObjectInfo(key string, size int64, etag, lastModified, storageClass string) ObjectInfo {
+	info := ObjectInfo{
+		Key:  key,
+		Size: size,
+		ETag: strings.Trim(etag, "\""),
+	}
+	if lastModified != "" {
+		if lm, err := time.Parse(time.RFC1123, lastModified); err == nil {
+			info.LastModified = lm
+		}
+	}
+	info.StorageClass = storageClass
+	return info
 }
 
 // ---- 下载 ----
