@@ -97,12 +97,17 @@ store, _ := objstore.New(objstore.Config{
 | 方法 | COS | S3 | 说明 |
 |---|:---:|:---:|---|
 | `HeadObject(ctx, key) (int64, error)` | ✅ | ✅ | 获取对象大小 |
-| `ListObjects(ctx, prefix) ([]string, error)` | ✅ | ✅ | 列出前缀下所有 Key（自动翻页） |
-| `ListObjectsWithSize(ctx, prefix) ([]ObjectInfo, error)` | ✅ | ✅ | 列出前缀下所有对象（含 Size，自动翻页） |
+| `ListObjects(ctx, ListOptions) ([]ObjectInfo, error)` | ✅ | ✅ | 列出对象（含 Size），通过 `ListOptions` 控制分层/递归 |
 | `BucketName() string` | ✅ | ✅ | 返回桶名（用于日志） |
 | `Provider() ProviderType` | ✅ | ✅ | 返回存储类型 |
 
-> ListObjects 内部自动循环翻页（COS 用 `Marker`，S3 用 `ContinuationToken`），单页 1000 条。
+> `ListObjects` 使用 `ListOptions` 参数控制列表行为：
+> - `Delimiter: "/"` → 只列出当前层（同 `ls`），自动翻页
+> - `Delimiter: ""` → 递归列出前缀下所有文件（同 `du`），自动遍历所有子目录
+> 
+> COS 与 S3 均支持相同的语义。
+
+> 内部自动循环翻页（COS 用 `Marker`，S3 用 `ContinuationToken`），单页 1000 条。
 
 ### 3. 下载
 
@@ -205,11 +210,15 @@ objstore.SetDebug(true)
 ## 接口总览
 
 ```go
+type ListOptions struct {
+    Prefix    string // 前缀路径
+    Delimiter string // 分隔符，默认 "/"（当前层）；传 "" 则递归列出所有对象
+}
+
 type Store interface {
     // 元信息
     HeadObject(ctx context.Context, key string) (int64, error)
-    ListObjects(ctx context.Context, prefix string) ([]string, error)
-    ListObjectsWithSize(ctx context.Context, prefix string) ([]ObjectInfo, error)
+    ListObjects(ctx context.Context, opts ListOptions) ([]ObjectInfo, error)
 
     // 下载
     GetObject(ctx context.Context, key string) (io.ReadCloser, error)
