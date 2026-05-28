@@ -432,3 +432,105 @@ func (s *s3Store) CopyPartFrom(ctx context.Context, dstKey string, src ServerCop
 	}
 	return nil
 }
+
+// ============================================================
+// MultipartResumer
+// ============================================================
+
+// InitMultipart 初始化一个分块上传，返回 uploadID
+func (s *s3Store) InitMultipart(ctx context.Context, key string) (string, error) {
+	resp, err := s.inner.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return "", fmt.Errorf("s3 InitMultipart: %w", err)
+	}
+	return aws.ToString(resp.UploadId), nil
+}
+
+// ListParts 列出已上传的分块
+func (s *s3Store) ListParts(ctx context.Context, key, uploadID string) ([]UploadedPart, error) {
+	var out []UploadedPart
+	var marker *string
+	for {
+		input := &s3.ListPartsInput{
+			Bucket:           aws.String(s.bucket),
+			Key:              aws.String(key),
+			UploadId:         aws.String(uploadID),
+			PartNumberMarker: marker,
+			MaxParts:         aws.Int32(1000),
+		}
+		resp, err := s.inner.ListParts(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("s3 ListParts: %w", err)
+		}
+		for _, p := range resp.Parts {
+			pn := int(aws.ToInt32(p.PartNumber))
+			sz := aws.ToInt64(p.Size)
+			out = append(out, UploadedPart{
+				PartNumber: pn,
+				ETag:       aws.ToString(p.ETag),
+				Size:       sz,
+			})
+		}
+		if !aws.ToBool(resp.IsTruncated) {
+			break
+		}
+		marker = resp.NextPartNumberMarker
+	}
+	return out, nil
+}
+
+// UploadPartN 上传单个分块，返回 ETag
+func (s *s3Store) UploadPartN(ctx context.Context, key, uploadID string, partNumber int, data []byte) (string, error) {
+	resp, err := s.inner.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(key),
+		UploadId:      aws.String(uploadID),
+		PartNumber:    aws.Int32(int32(partNumber)),
+		Body:          bytes.NewReader(data),
+		ContentLength: aws.Int64(int64(len(data))),
+	})
+	if err != nil {
+		return "", fmt.Errorf("s3 UploadPart %d: %w", partNumber, err)
+	}
+	return aws.ToString(resp.ETag), nil
+}
+
+// CompleteMultipart 提交所有分块
+func (s *s3Store) CompleteMultipart(ctx context.Context, key, uploadID string, parts []UploadedPart) error {
+	completed := make([]s3types.CompletedPart, 0, len(parts))
+	for _, p := range parts {
+		completed = append(completed, s3types.CompletedPart{
+			PartNumber: aws.Int32(int32(p.PartNumber)),
+			ETag:       aws.String(p.ETag),
+		})
+	}
+	sort.Slice(completed, func(i, j int) bool {
+		return aws.ToInt32(completed[i].PartNumber) < aws.ToInt32(completed[j].PartNumber)
+	})
+	_, err := s.inner.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(s.bucket),
+		Key:             aws.String(key),
+		UploadId:        aws.String(uploadID),
+		MultipartUpload: &s3types.CompletedMultipartUpload{Parts: completed},
+	})
+	if err != nil {
+		return fmt.Errorf("s3 CompleteMultipart: %w", err)
+	}
+	return nil
+}
+
+// AbortMultipart 取消分块上传
+func (s *s3Store) AbortMultipart(ctx context.Context, key, uploadID string) error {
+	_, err := s.inner.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(s.bucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+	})
+	if err != nil {
+		return fmt.Errorf("s3 AbortMultipart: %w", err)
+	}
+	return nil
+}

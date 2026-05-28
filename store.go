@@ -81,6 +81,30 @@ type Store interface {
 	Provider() ProviderType
 }
 
+// UploadedPart 已上传的分块信息
+type UploadedPart struct {
+	PartNumber int
+	ETag       string
+	Size       int64
+}
+
+// MultipartResumer 可恢复的分块上传接口。
+// COS / S3 实现；调用方通过类型断言检测。
+//
+// 典型使用流程：
+//   1. InitMultipart 拿到 uploadID（或复用上次保存的 uploadID）
+//   2. ListParts 看哪些分块已上传
+//   3. 遵循跳过策略，调 UploadPartN 上传未完成的分块
+//   4. CompleteMultipart 提交 所有分块
+//   5. 如需主动丢弃 → AbortMultipart
+type MultipartResumer interface {
+	InitMultipart(ctx context.Context, key string) (uploadID string, err error)
+	ListParts(ctx context.Context, key, uploadID string) ([]UploadedPart, error)
+	UploadPartN(ctx context.Context, key, uploadID string, partNumber int, data []byte) (etag string, err error)
+	CompleteMultipart(ctx context.Context, key, uploadID string, parts []UploadedPart) error
+	AbortMultipart(ctx context.Context, key, uploadID string) error
+}
+
 // ServerCopier 服务端对象复制接口，COS 和 S3 均实现。
 // 调用方通过类型断言判断是否可用，可用时走服务端复制（不过本机带宽）。
 type ServerCopier interface {

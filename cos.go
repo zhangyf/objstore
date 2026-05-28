@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -557,6 +558,88 @@ func (c *cosStore) CopyPartFrom(ctx context.Context, dstKey string, src ServerCo
 	if err != nil {
 		abort()
 		return fmt.Errorf("CompleteMultipartUpload: %w", err)
+	}
+	return nil
+}
+
+// ============================================================
+// MultipartResumer
+// ============================================================
+
+// InitMultipart 初始化一个分块上传，返回 uploadID
+func (c *cosStore) InitMultipart(ctx context.Context, key string) (string, error) {
+	c.logOperation("InitMultipart", key, "")
+	resp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, key, nil)
+	if err != nil {
+		return "", fmt.Errorf("cos InitMultipart: %w", err)
+	}
+	return resp.UploadID, nil
+}
+
+// ListParts 列出已上传的分块
+func (c *cosStore) ListParts(ctx context.Context, key, uploadID string) ([]UploadedPart, error) {
+	c.logOperation("ListParts", key, fmt.Sprintf("uploadID=%s", uploadID))
+
+	var out []UploadedPart
+	marker := ""
+	for {
+		opt := &cos.ObjectListPartsOptions{
+			MaxParts:         "1000",
+			PartNumberMarker: marker,
+		}
+		res, _, err := c.inner.Object.ListParts(ctx, key, uploadID, opt)
+		if err != nil {
+			return nil, fmt.Errorf("cos ListParts: %w", err)
+		}
+		for _, p := range res.Parts {
+			sz, _ := strconv.ParseInt(fmt.Sprintf("%v", p.Size), 10, 64)
+			out = append(out, UploadedPart{
+				PartNumber: p.PartNumber,
+				ETag:       p.ETag,
+				Size:       sz,
+			})
+		}
+		if !res.IsTruncated {
+			break
+		}
+		marker = res.NextPartNumberMarker
+	}
+	return out, nil
+}
+
+// UploadPartN 上传单个分块，返回 ETag
+func (c *cosStore) UploadPartN(ctx context.Context, key, uploadID string, partNumber int, data []byte) (string, error) {
+	resp, err := c.inner.Object.UploadPart(ctx, key, uploadID, partNumber, bytes.NewReader(data), nil)
+	if err != nil {
+		return "", fmt.Errorf("cos UploadPart %d: %w", partNumber, err)
+	}
+	return resp.Header.Get("ETag"), nil
+}
+
+// CompleteMultipart 提交所有分块
+func (c *cosStore) CompleteMultipart(ctx context.Context, key, uploadID string, parts []UploadedPart) error {
+	c.logOperation("CompleteMultipart", key, fmt.Sprintf("uploadID=%s parts=%d", uploadID, len(parts)))
+
+	cosParts := make([]cos.Object, 0, len(parts))
+	for _, p := range parts {
+		cosParts = append(cosParts, cos.Object{PartNumber: p.PartNumber, ETag: p.ETag})
+	}
+	sort.Slice(cosParts, func(i, j int) bool { return cosParts[i].PartNumber < cosParts[j].PartNumber })
+
+	_, _, err := c.inner.Object.CompleteMultipartUpload(ctx, key, uploadID,
+		&cos.CompleteMultipartUploadOptions{Parts: cosParts})
+	if err != nil {
+		return fmt.Errorf("cos CompleteMultipart: %w", err)
+	}
+	return nil
+}
+
+// AbortMultipart 取消分块上传
+func (c *cosStore) AbortMultipart(ctx context.Context, key, uploadID string) error {
+	c.logOperation("AbortMultipart", key, fmt.Sprintf("uploadID=%s", uploadID))
+	_, err := c.inner.Object.AbortMultipartUpload(ctx, key, uploadID)
+	if err != nil {
+		return fmt.Errorf("cos AbortMultipart: %w", err)
 	}
 	return nil
 }
