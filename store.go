@@ -35,6 +35,15 @@ type PutOptions struct {
 	//   COS:  STANDARD | STANDARD_IA | INTELLIGENT_TIERING | ARCHIVE | DEEP_ARCHIVE | MAZ_STANDARD | MAZ_STANDARD_IA
 	//   S3:   STANDARD | STANDARD_IA | ONEZONE_IA | INTELLIGENT_TIERING | GLACIER | DEEP_ARCHIVE | REDUCED_REDUNDANCY
 	StorageClass string
+
+	// Canned ACL。注意：S3 与 COS 支持的 canned 值不同，调用方负责按 provider 校验。
+	//   S3 (7): private | public-read | public-read-write | authenticated-read |
+	//           aws-exec-read | bucket-owner-read | bucket-owner-full-control
+	//   COS (4): default | private | public-read | public-read-write
+	ACL string
+
+	// 对象 Tag (URL-safe key=value)。S3 走 x-amz-tagging，COS 走 x-cos-tagging。
+	Tags map[string]string
 }
 
 // HasAny 返回是否含任意一项设置，默认 nil 表示什么都不传。
@@ -42,7 +51,8 @@ func (o *PutOptions) HasAny() bool {
 	if o == nil {
 		return false
 	}
-	return o.ContentType != "" || o.CacheControl != "" || o.StorageClass != "" || len(o.Metadata) > 0
+	return o.ContentType != "" || o.CacheControl != "" || o.StorageClass != "" ||
+		o.ACL != "" || len(o.Metadata) > 0 || len(o.Tags) > 0
 }
 
 // Store 统一对象存储接口，COS / S3 各自实现

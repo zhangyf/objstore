@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -561,6 +562,12 @@ func applyS3PutOptions(input *s3.PutObjectInput, opts *PutOptions) {
 	if opts.StorageClass != "" {
 		input.StorageClass = s3types.StorageClass(opts.StorageClass)
 	}
+	if opts.ACL != "" {
+		input.ACL = s3types.ObjectCannedACL(opts.ACL)
+	}
+	if len(opts.Tags) > 0 {
+		input.Tagging = aws.String(encodeS3Tagging(opts.Tags))
+	}
 	if len(opts.Metadata) > 0 {
 		m := make(map[string]string, len(opts.Metadata))
 		for k, v := range opts.Metadata {
@@ -584,6 +591,12 @@ func applyS3CreateMultipart(input *s3.CreateMultipartUploadInput, opts *PutOptio
 	if opts.StorageClass != "" {
 		input.StorageClass = s3types.StorageClass(opts.StorageClass)
 	}
+	if opts.ACL != "" {
+		input.ACL = s3types.ObjectCannedACL(opts.ACL)
+	}
+	if len(opts.Tags) > 0 {
+		input.Tagging = aws.String(encodeS3Tagging(opts.Tags))
+	}
 	if len(opts.Metadata) > 0 {
 		m := make(map[string]string, len(opts.Metadata))
 		for k, v := range opts.Metadata {
@@ -591,6 +604,15 @@ func applyS3CreateMultipart(input *s3.CreateMultipartUploadInput, opts *PutOptio
 		}
 		input.Metadata = m
 	}
+}
+
+// encodeS3Tagging 按 S3 文档 Tagging header 格式编码 (k1=v1&k2=v2，k/v URL-encoded)。
+func encodeS3Tagging(tags map[string]string) string {
+	values := url.Values{}
+	for k, v := range tags {
+		values.Set(k, v)
+	}
+	return values.Encode()
 }
 
 func (s *s3Store) PutObjectOpt(ctx context.Context, key string, data []byte, opts *PutOptions) error {

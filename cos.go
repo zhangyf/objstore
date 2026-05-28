@@ -683,8 +683,32 @@ func buildCosPutHeader(opts *PutOptions, contentLength int64) *cos.ObjectPutHead
 			}
 			h.XCosMetaXXX = &meta
 		}
+		// Tag 由 x-cos-tagging 透传，SDK 本身不暴露专用字段，走 XOptionHeader
+		if len(opts.Tags) > 0 {
+			extra := http.Header{}
+			extra.Set("x-cos-tagging", encodeTagging(opts.Tags))
+			h.XOptionHeader = &extra
+		}
 	}
 	return h
+}
+
+// buildCosACLHeader 根据 PutOptions.ACL 构造 COS ACLHeaderOptions。
+func buildCosACLHeader(opts *PutOptions) *cos.ACLHeaderOptions {
+	if opts == nil || opts.ACL == "" {
+		return nil
+	}
+	return &cos.ACLHeaderOptions{XCosACL: opts.ACL}
+}
+
+// encodeTagging 将 tag map 编码为 URL query 格式（k1=v1&k2=v2）。
+// S3 与 COS 的 Tagging header 都使用该格式，key/value 需预先 URL-encode。
+func encodeTagging(tags map[string]string) string {
+	values := url.Values{}
+	for k, v := range tags {
+		values.Set(k, v)
+	}
+	return values.Encode()
 }
 
 func (c *cosStore) PutObjectOpt(ctx context.Context, key string, data []byte, opts *PutOptions) error {
@@ -692,6 +716,7 @@ func (c *cosStore) PutObjectOpt(ctx context.Context, key string, data []byte, op
 	var putOpt *cos.ObjectPutOptions
 	if opts.HasAny() {
 		putOpt = &cos.ObjectPutOptions{
+			ACLHeaderOptions:       buildCosACLHeader(opts),
 			ObjectPutHeaderOptions: buildCosPutHeader(opts, -1),
 		}
 	}
@@ -702,6 +727,7 @@ func (c *cosStore) PutObjectOpt(ctx context.Context, key string, data []byte, op
 func (c *cosStore) PutObjectStreamOpt(ctx context.Context, key string, r io.Reader, size int64, opts *PutOptions) error {
 	c.logOperation("PutObjectStreamOpt", key, fmt.Sprintf("size=%d, opts=%v", size, opts.HasAny()))
 	putOpt := &cos.ObjectPutOptions{
+		ACLHeaderOptions:       buildCosACLHeader(opts),
 		ObjectPutHeaderOptions: buildCosPutHeader(opts, size),
 	}
 	_, err := c.inner.Object.Put(ctx, key, r, putOpt)
@@ -713,6 +739,7 @@ func (c *cosStore) InitMultipartOpt(ctx context.Context, key string, opts *PutOp
 	var initOpt *cos.InitiateMultipartUploadOptions
 	if opts.HasAny() {
 		initOpt = &cos.InitiateMultipartUploadOptions{
+			ACLHeaderOptions:       buildCosACLHeader(opts),
 			ObjectPutHeaderOptions: buildCosPutHeader(opts, -1),
 		}
 	}
@@ -732,6 +759,7 @@ func (c *cosStore) MultipartUploadOpt(ctx context.Context, key string, totalSize
 	var initOpt *cos.InitiateMultipartUploadOptions
 	if opts.HasAny() {
 		initOpt = &cos.InitiateMultipartUploadOptions{
+			ACLHeaderOptions:       buildCosACLHeader(opts),
 			ObjectPutHeaderOptions: buildCosPutHeader(opts, -1),
 		}
 	}
