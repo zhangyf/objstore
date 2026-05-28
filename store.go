@@ -139,6 +139,19 @@ type MultipartResumer interface {
 	AbortMultipart(ctx context.Context, key, uploadID string) error
 }
 
+// IncompleteUpload 描述云端一个未完成的 multipart upload。
+type IncompleteUpload struct {
+	Key       string
+	UploadID  string
+	Initiated time.Time // 发起初始化的时间
+}
+
+// MultipartLister 可选接口：列出云端未完成的 multipart uploads。
+// COS / S3 均实现。prefix 为空表示整个桶。
+type MultipartLister interface {
+	ListIncompleteUploads(ctx context.Context, prefix string) ([]IncompleteUpload, error)
+}
+
 // ServerCopier 服务端对象复制接口，COS 和 S3 均实现。
 // 调用方通过类型断言判断是否可用，可用时走服务端复制（不过本机带宽）。
 type ServerCopier interface {

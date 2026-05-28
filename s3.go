@@ -544,6 +544,45 @@ func (s *s3Store) AbortMultipart(ctx context.Context, key, uploadID string) erro
 	return nil
 }
 
+// ListIncompleteUploads 列出云端未完成的 multipart uploads（自动分页）。
+func (s *s3Store) ListIncompleteUploads(ctx context.Context, prefix string) ([]IncompleteUpload, error) {
+	var out []IncompleteUpload
+	var keyMarker, uploadIDMarker *string
+	for {
+		in := &s3.ListMultipartUploadsInput{
+			Bucket:         aws.String(s.bucket),
+			KeyMarker:      keyMarker,
+			UploadIdMarker: uploadIDMarker,
+		}
+		if prefix != "" {
+			in.Prefix = aws.String(prefix)
+		}
+		res, err := s.inner.ListMultipartUploads(ctx, in)
+		if err != nil {
+			return nil, fmt.Errorf("s3 ListMultipartUploads: %w", err)
+		}
+		for _, u := range res.Uploads {
+			item := IncompleteUpload{}
+			if u.Key != nil {
+				item.Key = *u.Key
+			}
+			if u.UploadId != nil {
+				item.UploadID = *u.UploadId
+			}
+			if u.Initiated != nil {
+				item.Initiated = *u.Initiated
+			}
+			out = append(out, item)
+		}
+		if res.IsTruncated == nil || !*res.IsTruncated {
+			break
+		}
+		keyMarker = res.NextKeyMarker
+		uploadIDMarker = res.NextUploadIdMarker
+	}
+	return out, nil
+}
+
 // ============================================================
 // OptionalUploader 实现：带元数据的上传
 // ============================================================

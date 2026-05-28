@@ -653,6 +653,39 @@ func (c *cosStore) AbortMultipart(ctx context.Context, key, uploadID string) err
 	return nil
 }
 
+// ListIncompleteUploads 列出云端未完成的 multipart uploads（自动分页）。
+func (c *cosStore) ListIncompleteUploads(ctx context.Context, prefix string) ([]IncompleteUpload, error) {
+	c.logOperation("ListIncompleteUploads", prefix, "")
+	var out []IncompleteUpload
+	var keyMarker, uploadIDMarker string
+	for {
+		opt := &cos.ListMultipartUploadsOptions{
+			Prefix:         prefix,
+			MaxUploads:     1000,
+			KeyMarker:      keyMarker,
+			UploadIDMarker: uploadIDMarker,
+		}
+		res, _, err := c.inner.Bucket.ListMultipartUploads(ctx, opt)
+		if err != nil {
+			return nil, fmt.Errorf("cos ListMultipartUploads: %w", err)
+		}
+		for _, u := range res.Uploads {
+			t, _ := time.Parse(time.RFC3339, u.Initiated)
+			out = append(out, IncompleteUpload{
+				Key:       u.Key,
+				UploadID:  u.UploadID,
+				Initiated: t,
+			})
+		}
+		if !res.IsTruncated {
+			break
+		}
+		keyMarker = res.NextKeyMarker
+		uploadIDMarker = res.NextUploadIDMarker
+	}
+	return out, nil
+}
+
 // ============================================================
 // OptionalUploader 实现：带元数据的上传
 // ============================================================
