@@ -652,3 +652,149 @@ func (c *cosStore) AbortMultipart(ctx context.Context, key, uploadID string) err
 	}
 	return nil
 }
+
+// ============================================================
+// OptionalUploader 实现：带元数据的上传
+// ============================================================
+
+// buildCosPutHeader 根据 PutOptions 构造 COS put header
+func buildCosPutHeader(opts *PutOptions, contentLength int64) *cos.ObjectPutHeaderOptions {
+	if opts == nil && contentLength < 0 {
+		return nil
+	}
+	h := &cos.ObjectPutHeaderOptions{}
+	if contentLength >= 0 {
+		h.ContentLength = contentLength
+	}
+	if opts != nil {
+		if opts.ContentType != "" {
+			h.ContentType = opts.ContentType
+		}
+		if opts.CacheControl != "" {
+			h.CacheControl = opts.CacheControl
+		}
+		if opts.StorageClass != "" {
+			h.XCosStorageClass = opts.StorageClass
+		}
+		if len(opts.Metadata) > 0 {
+			meta := http.Header{}
+			for k, v := range opts.Metadata {
+				meta.Set("x-cos-meta-"+k, v)
+			}
+			h.XCosMetaXXX = &meta
+		}
+	}
+	return h
+}
+
+func (c *cosStore) PutObjectOpt(ctx context.Context, key string, data []byte, opts *PutOptions) error {
+	c.logOperation("PutObjectOpt", key, fmt.Sprintf("size=%d, opts=%v", len(data), opts.HasAny()))
+	var putOpt *cos.ObjectPutOptions
+	if opts.HasAny() {
+		putOpt = &cos.ObjectPutOptions{
+			ObjectPutHeaderOptions: buildCosPutHeader(opts, -1),
+		}
+	}
+	_, err := c.inner.Object.Put(ctx, key, bytes.NewReader(data), putOpt)
+	return err
+}
+
+func (c *cosStore) PutObjectStreamOpt(ctx context.Context, key string, r io.Reader, size int64, opts *PutOptions) error {
+	c.logOperation("PutObjectStreamOpt", key, fmt.Sprintf("size=%d, opts=%v", size, opts.HasAny()))
+	putOpt := &cos.ObjectPutOptions{
+		ObjectPutHeaderOptions: buildCosPutHeader(opts, size),
+	}
+	_, err := c.inner.Object.Put(ctx, key, r, putOpt)
+	return err
+}
+
+func (c *cosStore) InitMultipartOpt(ctx context.Context, key string, opts *PutOptions) (string, error) {
+	c.logOperation("InitMultipartOpt", key, fmt.Sprintf("opts=%v", opts.HasAny()))
+	var initOpt *cos.InitiateMultipartUploadOptions
+	if opts.HasAny() {
+		initOpt = &cos.InitiateMultipartUploadOptions{
+			ObjectPutHeaderOptions: buildCosPutHeader(opts, -1),
+		}
+	}
+	resp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, key, initOpt)
+	if err != nil {
+		return "", fmt.Errorf("cos InitMultipartOpt: %w", err)
+	}
+	return resp.UploadID, nil
+}
+
+// MultipartUploadOpt 与 MultipartUpload 完全一致，只在 Init 时多设了 PutOptions。
+// 其余分块上传/合并流程不变。
+func (c *cosStore) MultipartUploadOpt(ctx context.Context, key string, totalSize, chunkSize int64, concurrency int,
+	fetchPart func(partNumber int, offset, size int64) ([]byte, error), opts *PutOptions) error {
+
+	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
+	var initOpt *cos.InitiateMultipartUploadOptions
+	if opts.HasAny() {
+		initOpt = &cos.InitiateMultipartUploadOptions{
+			ObjectPutHeaderOptions: buildCosPutHeader(opts, -1),
+		}
+	}
+	initResp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, key, initOpt)
+	if err != nil {
+		return fmt.Errorf("InitiateMultipartUpload: %w", err)
+	}
+	uploadID := initResp.UploadID
+	abort := func() { c.inner.Object.AbortMultipartUpload(ctx, key, uploadID) }
+
+	type partResult struct {
+		partNumber int
+		etag       string
+		err        error
+	}
+	jobs := make(chan int, concurrency*2)
+	results := make(chan partResult, totalParts)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for pn := range jobs {
+				offset := int64(pn-1) * chunkSize
+				sz := chunkSize
+				if offset+sz > totalSize {
+					sz = totalSize - offset
+				}
+				data, err := fetchPart(pn, offset, sz)
+				if err != nil {
+					results <- partResult{partNumber: pn, err: err}
+					continue
+				}
+				resp, err := c.inner.Object.UploadPart(ctx, key, uploadID, pn, bytes.NewReader(data), nil)
+				if err != nil {
+					results <- partResult{partNumber: pn, err: err}
+					continue
+				}
+				results <- partResult{partNumber: pn, etag: resp.Header.Get("ETag")}
+			}
+		}()
+	}
+	go func() {
+		for pn := 1; pn <= totalParts; pn++ {
+			jobs <- pn
+		}
+		close(jobs)
+	}()
+	go func() { wg.Wait(); close(results) }()
+
+	parts := make([]cos.Object, 0, totalParts)
+	for r := range results {
+		if r.err != nil {
+			abort()
+			return fmt.Errorf("UploadPart %d: %w", r.partNumber, r.err)
+		}
+		parts = append(parts, cos.Object{PartNumber: r.partNumber, ETag: r.etag})
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].PartNumber < parts[j].PartNumber })
+	_, _, err = c.inner.Object.CompleteMultipartUpload(ctx, key, uploadID, &cos.CompleteMultipartUploadOptions{Parts: parts})
+	if err != nil {
+		abort()
+		return fmt.Errorf("CompleteMultipartUpload: %w", err)
+	}
+	return nil
+}

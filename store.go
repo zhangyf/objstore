@@ -21,6 +21,30 @@ type ListOptions struct {
 	Delimiter string // 分隔符，默认 "/"；传 "" 则递归列出所有对象（不分组）
 }
 
+// PutOptions 上传/初始化 multipart 时可选的对象属性。
+// COS / S3 各自映射到对应 SDK。为 nil 时表示不设置。
+type PutOptions struct {
+	// HTTP 头
+	ContentType  string
+	CacheControl string
+
+	// 用户自定义元数据（不带前缀，底层 SDK 会加 x-amz-meta-/x-cos-meta-）
+	Metadata map[string]string
+
+	// 存储类型。填入云友好的字面量：
+	//   COS:  STANDARD | STANDARD_IA | INTELLIGENT_TIERING | ARCHIVE | DEEP_ARCHIVE | MAZ_STANDARD | MAZ_STANDARD_IA
+	//   S3:   STANDARD | STANDARD_IA | ONEZONE_IA | INTELLIGENT_TIERING | GLACIER | DEEP_ARCHIVE | REDUCED_REDUNDANCY
+	StorageClass string
+}
+
+// HasAny 返回是否含任意一项设置，默认 nil 表示什么都不传。
+func (o *PutOptions) HasAny() bool {
+	if o == nil {
+		return false
+	}
+	return o.ContentType != "" || o.CacheControl != "" || o.StorageClass != "" || len(o.Metadata) > 0
+}
+
 // Store 统一对象存储接口，COS / S3 各自实现
 type Store interface {
 	// --- 元信息 ---
@@ -116,4 +140,15 @@ type ServerCopier interface {
 	CopyPartFrom(ctx context.Context, dstKey string, src ServerCopier,
 		srcKey string, totalSize, chunkSize int64, concurrency int,
 		onChunkDone func(int64)) error
+}
+
+// OptionalUploader 可选的带属性上传接口。
+// 调用方通过类型断言检测；COS / S3 均实现。
+// opts 为 nil 时等价于调用不带参数的上传。
+type OptionalUploader interface {
+	PutObjectOpt(ctx context.Context, key string, data []byte, opts *PutOptions) error
+	PutObjectStreamOpt(ctx context.Context, key string, r io.Reader, size int64, opts *PutOptions) error
+	MultipartUploadOpt(ctx context.Context, key string, totalSize, chunkSize int64, concurrency int,
+		fetchPart func(partNumber int, offset, size int64) ([]byte, error), opts *PutOptions) error
+	InitMultipartOpt(ctx context.Context, key string, opts *PutOptions) (uploadID string, err error)
 }

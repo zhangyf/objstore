@@ -542,3 +542,189 @@ func (s *s3Store) AbortMultipart(ctx context.Context, key, uploadID string) erro
 	}
 	return nil
 }
+
+// ============================================================
+// OptionalUploader 实现：带元数据的上传
+// ============================================================
+
+// applyS3PutOptions 把 PutOptions 写入 PutObjectInput
+func applyS3PutOptions(input *s3.PutObjectInput, opts *PutOptions) {
+	if !opts.HasAny() {
+		return
+	}
+	if opts.ContentType != "" {
+		input.ContentType = aws.String(opts.ContentType)
+	}
+	if opts.CacheControl != "" {
+		input.CacheControl = aws.String(opts.CacheControl)
+	}
+	if opts.StorageClass != "" {
+		input.StorageClass = s3types.StorageClass(opts.StorageClass)
+	}
+	if len(opts.Metadata) > 0 {
+		m := make(map[string]string, len(opts.Metadata))
+		for k, v := range opts.Metadata {
+			m[k] = v
+		}
+		input.Metadata = m
+	}
+}
+
+// applyS3CreateMultipart 把 PutOptions 写入 CreateMultipartUploadInput
+func applyS3CreateMultipart(input *s3.CreateMultipartUploadInput, opts *PutOptions) {
+	if !opts.HasAny() {
+		return
+	}
+	if opts.ContentType != "" {
+		input.ContentType = aws.String(opts.ContentType)
+	}
+	if opts.CacheControl != "" {
+		input.CacheControl = aws.String(opts.CacheControl)
+	}
+	if opts.StorageClass != "" {
+		input.StorageClass = s3types.StorageClass(opts.StorageClass)
+	}
+	if len(opts.Metadata) > 0 {
+		m := make(map[string]string, len(opts.Metadata))
+		for k, v := range opts.Metadata {
+			m[k] = v
+		}
+		input.Metadata = m
+	}
+}
+
+func (s *s3Store) PutObjectOpt(ctx context.Context, key string, data []byte, opts *PutOptions) error {
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(data),
+	}
+	applyS3PutOptions(input, opts)
+	_, err := s.inner.PutObject(ctx, input)
+	return err
+}
+
+func (s *s3Store) PutObjectStreamOpt(ctx context.Context, key string, r io.Reader, size int64, opts *PutOptions) error {
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+		Body:   r,
+	}
+	if size >= 0 {
+		input.ContentLength = aws.Int64(size)
+	}
+	applyS3PutOptions(input, opts)
+	_, err := s.inner.PutObject(ctx, input)
+	return err
+}
+
+func (s *s3Store) InitMultipartOpt(ctx context.Context, key string, opts *PutOptions) (string, error) {
+	input := &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}
+	applyS3CreateMultipart(input, opts)
+	resp, err := s.inner.CreateMultipartUpload(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("s3 InitMultipartOpt: %w", err)
+	}
+	return aws.ToString(resp.UploadId), nil
+}
+
+// MultipartUploadOpt 与 MultipartUpload 完全一致，只在 Init 时多设了 PutOptions。
+func (s *s3Store) MultipartUploadOpt(ctx context.Context, key string, totalSize, chunkSize int64, concurrency int,
+	fetchPart func(partNumber int, offset, size int64) ([]byte, error), opts *PutOptions) error {
+
+	if chunkSize < 5*1024*1024 && totalSize > chunkSize {
+		return fmt.Errorf("S3 multipart 上传 chunk 必须 ≥ 5MB（当前 -chunk=%d）", chunkSize/1024/1024)
+	}
+	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
+	createInput := &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}
+	applyS3CreateMultipart(createInput, opts)
+	createResp, err := s.inner.CreateMultipartUpload(ctx, createInput)
+	if err != nil {
+		return fmt.Errorf("CreateMultipartUpload: %w", err)
+	}
+	uploadID := aws.ToString(createResp.UploadId)
+	abort := func() {
+		s.inner.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(s.bucket),
+			Key:      aws.String(key),
+			UploadId: aws.String(uploadID),
+		})
+	}
+
+	type partResult struct {
+		partNumber int
+		etag       string
+		err        error
+	}
+	jobs := make(chan int, concurrency*2)
+	results := make(chan partResult, totalParts)
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for pn := range jobs {
+				offset := int64(pn-1) * chunkSize
+				sz := chunkSize
+				if offset+sz > totalSize {
+					sz = totalSize - offset
+				}
+				data, err := fetchPart(pn, offset, sz)
+				if err != nil {
+					results <- partResult{partNumber: pn, err: err}
+					continue
+				}
+				upResp, err := s.inner.UploadPart(ctx, &s3.UploadPartInput{
+					Bucket:        aws.String(s.bucket),
+					Key:           aws.String(key),
+					UploadId:      aws.String(uploadID),
+					PartNumber:    aws.Int32(int32(pn)),
+					Body:          bytes.NewReader(data),
+					ContentLength: aws.Int64(int64(len(data))),
+				})
+				if err != nil {
+					results <- partResult{partNumber: pn, err: err}
+					continue
+				}
+				results <- partResult{partNumber: pn, etag: aws.ToString(upResp.ETag)}
+			}
+		}()
+	}
+	go func() {
+		for pn := 1; pn <= totalParts; pn++ {
+			jobs <- pn
+		}
+		close(jobs)
+	}()
+	go func() { wg.Wait(); close(results) }()
+
+	completed := make([]s3types.CompletedPart, 0, totalParts)
+	for r := range results {
+		if r.err != nil {
+			abort()
+			return fmt.Errorf("UploadPart %d: %w", r.partNumber, r.err)
+		}
+		completed = append(completed, s3types.CompletedPart{
+			PartNumber: aws.Int32(int32(r.partNumber)),
+			ETag:       aws.String(r.etag),
+		})
+	}
+	sort.Slice(completed, func(i, j int) bool { return aws.ToInt32(completed[i].PartNumber) < aws.ToInt32(completed[j].PartNumber) })
+	_, err = s.inner.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(s.bucket),
+		Key:             aws.String(key),
+		UploadId:        aws.String(uploadID),
+		MultipartUpload: &s3types.CompletedMultipartUpload{Parts: completed},
+	})
+	if err != nil {
+		abort()
+		return fmt.Errorf("CompleteMultipartUpload: %w", err)
+	}
+	return nil
+}
