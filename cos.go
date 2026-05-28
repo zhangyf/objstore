@@ -593,9 +593,11 @@ func (c *cosStore) ListParts(ctx context.Context, key, uploadID string) ([]Uploa
 		}
 		for _, p := range res.Parts {
 			sz, _ := strconv.ParseInt(fmt.Sprintf("%v", p.Size), 10, 64)
+			// 去除可能的双引号，保持状态中 ETag 格式一致
+			etag := strings.Trim(p.ETag, "\"")
 			out = append(out, UploadedPart{
 				PartNumber: p.PartNumber,
-				ETag:       p.ETag,
+				ETag:       etag,
 				Size:       sz,
 			})
 		}
