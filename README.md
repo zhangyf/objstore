@@ -10,6 +10,9 @@
 - ✅ **流式 I/O**：上传下载均支持流式读写，大文件不落盘、不占内存
 - ✅ **并发分块上传**：内置 worker 池，支持自定义并发度和分块大小
 - ✅ **服务端复制**：提供 `ServerCopier` 接口，跨桶/同桶复制走对象存储侧（不过本机带宽）
+- ✅ **断点续传**：`MultipartResumer` 接口，合作 InitMultipart / ListParts / UploadPartN / CompleteMultipart / AbortMultipart 完成可恢复分块上传
+- ✅ **孤儿扫描与 abort**：`MultipartLister.ListIncompleteUploads` 拿云端未完成 multipart uploads 全量列表（自动分页）。[v0.11.0]
+- ✅ **对象属性透传**：`OptionalUploader` + `PutOptions` 透传 ContentType / CacheControl / Metadata / StorageClass / ACL / Tags。[v0.10.0]
 - ✅ **内网优化**：COS 默认使用 `cos-internal.<region>.tencentcos.cn` 域名，走腾讯云内网链路
 - ✅ **S3 兼容**：通过 `Endpoint` 字段可对接任意 S3 兼容存储（MinIO 等），自动启用 path-style
 - ✅ **预签名 URL**：内置 GET / PUT 预签名，临时分发上传/下载无需暴露密钥
@@ -188,7 +191,52 @@ putURL, err := store.PresignPutObject(ctx, "path/to/object", 15*time.Minute)
 |---|:---:|:---:|---|
 | `DeleteObject(ctx, key) error` | ✅ | ✅ | 删除单个对象 |
 
-### 8. 调试日志
+### 8. 对象属性上传（OptionalUploader，v0.10.0）
+
+调用方用类型断言检测，然后用带 `Opt` 后缀的方法透传 `PutOptions`。COS / S3 均实现。
+
+```go
+opts := &objstore.PutOptions{
+    ContentType:  "text/html; charset=utf-8",
+    CacheControl: "max-age=3600",
+    Metadata:     map[string]string{"owner": "lingbo"},
+    StorageClass: "STANDARD_IA",
+    ACL:          "public-read",
+    Tags:         map[string]string{"env": "prod", "team": "storage"},
+}
+
+if up, ok := store.(objstore.OptionalUploader); ok {
+    _ = up.PutObjectOpt(ctx, "web/index.html", htmlBytes, opts)
+}
+```
+
+覆盖上传的 4 条路径：`PutObjectOpt` / `PutObjectStreamOpt` / `InitMultipartOpt` / `MultipartUploadOpt`。跨厂商拷贝（S3↔COS）也会从源端读取 metadata 并透传。
+
+> StorageClass / ACL 枚举本库不做本地校验（由上层决定），误传会在云端报 400。
+
+### 9. 云端未完成 multipart uploads 扫描（MultipartLister，v0.11.0）
+
+拿所指桶/前缀下云端保留的未完成 multipart uploads 全量列表（本函数自动处理分页）。与 `MultipartResumer.AbortMultipart` 配合可清理云端孤儿、释放计费。
+
+```go
+if lister, ok := store.(objstore.MultipartLister); ok {
+    uploads, err := lister.ListIncompleteUploads(ctx, "data/")
+    if err != nil {
+        return err
+    }
+    fmt.Printf("未完成上传 %d 个\n", len(uploads))
+
+    if resumer, ok := store.(objstore.MultipartResumer); ok {
+        for _, u := range uploads {
+            if time.Since(u.Initiated) > 24*time.Hour {  // 只清理超过 24h 的孤儿
+                _ = resumer.AbortMultipart(ctx, u.Key, u.UploadID)
+            }
+        }
+    }
+}
+```
+
+### 10. 调试日志
 
 通过环境变量或 API 开启详细操作日志（请求 URL、bucket、region、key 等）：
 
@@ -243,10 +291,53 @@ type Store interface {
     Provider() ProviderType
 }
 
+// 可选扩展接口：调用方用类型断言检测
+func IsServerCopier(s Store) bool { _, ok := s.(ServerCopier); return ok }
+
 type ServerCopier interface {
     CopyObject(ctx context.Context, dstKey string, src ServerCopier, srcKey string) error
     CopyPartFrom(ctx context.Context, dstKey string, src ServerCopier, srcKey string,
         totalSize, chunkSize int64, concurrency int, onChunkDone func(int64)) error
+}
+
+// MultipartResumer 可恢复的分块上传接口。
+type MultipartResumer interface {
+    InitMultipart(ctx context.Context, key string) (uploadID string, err error)
+    ListParts(ctx context.Context, key, uploadID string) ([]UploadedPart, error)
+    UploadPartN(ctx context.Context, key, uploadID string, partNumber int, data []byte) (etag string, err error)
+    CompleteMultipart(ctx context.Context, key, uploadID string, parts []UploadedPart) error
+    AbortMultipart(ctx context.Context, key, uploadID string) error
+}
+
+// MultipartLister 列出云端未完成 multipart uploads（v0.11.0）。
+type IncompleteUpload struct {
+    Key       string
+    UploadID  string
+    Initiated time.Time
+}
+
+type MultipartLister interface {
+    ListIncompleteUploads(ctx context.Context, prefix string) ([]IncompleteUpload, error)
+}
+
+// OptionalUploader 带对象属性的上传（v0.10.0）。在 4 条上传路径上透传 PutOptions。
+type PutOptions struct {
+    ContentType   string            // 为空表示云端自动推断
+    CacheControl  string
+    Metadata      map[string]string // 进 x-amz-meta-* / x-cos-meta-*
+    StorageClass  string            // STANDARD / STANDARD_IA / …按 provider 取值
+    ACL           string            // canned ACL，按 provider 取值
+    Tags          map[string]string // 进 x-amz-tagging / x-cos-tagging
+}
+
+func (o *PutOptions) HasAny() bool { /* 字段不为空则 true */ }
+
+type OptionalUploader interface {
+    PutObjectOpt(ctx context.Context, key string, data []byte, opts *PutOptions) error
+    PutObjectStreamOpt(ctx context.Context, key string, r io.Reader, size int64, opts *PutOptions) error
+    InitMultipartOpt(ctx context.Context, key string, opts *PutOptions) (uploadID string, err error)
+    MultipartUploadOpt(ctx context.Context, key string, totalSize, chunkSize int64,
+        concurrency int, fetchPart func(int, int64, int64) ([]byte, error), opts *PutOptions) error
 }
 ```
 
