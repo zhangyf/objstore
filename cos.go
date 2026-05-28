@@ -613,7 +613,10 @@ func (c *cosStore) UploadPartN(ctx context.Context, key, uploadID string, partNu
 	if err != nil {
 		return "", fmt.Errorf("cos UploadPart %d: %w", partNumber, err)
 	}
-	return resp.Header.Get("ETag"), nil
+	// COS HTTP Header 返回的 ETag 带双引号，ListParts 返回的不带
+	// 统一不带引号版本，提交时再加
+	etag := strings.Trim(resp.Header.Get("ETag"), "\"")
+	return etag, nil
 }
 
 // CompleteMultipart 提交所有分块
@@ -622,7 +625,11 @@ func (c *cosStore) CompleteMultipart(ctx context.Context, key, uploadID string, 
 
 	cosParts := make([]cos.Object, 0, len(parts))
 	for _, p := range parts {
-		cosParts = append(cosParts, cos.Object{PartNumber: p.PartNumber, ETag: p.ETag})
+		etag := p.ETag
+		if !strings.HasPrefix(etag, "\"") {
+			etag = "\"" + etag + "\""
+		}
+		cosParts = append(cosParts, cos.Object{PartNumber: p.PartNumber, ETag: etag})
 	}
 	sort.Slice(cosParts, func(i, j int) bool { return cosParts[i].PartNumber < cosParts[j].PartNumber })
 

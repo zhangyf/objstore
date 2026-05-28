@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -495,16 +496,23 @@ func (s *s3Store) UploadPartN(ctx context.Context, key, uploadID string, partNum
 	if err != nil {
 		return "", fmt.Errorf("s3 UploadPart %d: %w", partNumber, err)
 	}
-	return aws.ToString(resp.ETag), nil
+	// 与 cos 一致：存状态不带引号
+	etag := strings.Trim(aws.ToString(resp.ETag), "\"")
+	return etag, nil
 }
 
 // CompleteMultipart 提交所有分块
 func (s *s3Store) CompleteMultipart(ctx context.Context, key, uploadID string, parts []UploadedPart) error {
 	completed := make([]s3types.CompletedPart, 0, len(parts))
 	for _, p := range parts {
+		// S3 提交时需要带引号的 ETag
+		etag := p.ETag
+		if !strings.HasPrefix(etag, "\"") {
+			etag = "\"" + etag + "\""
+		}
 		completed = append(completed, s3types.CompletedPart{
 			PartNumber: aws.Int32(int32(p.PartNumber)),
-			ETag:       aws.String(p.ETag),
+			ETag:       aws.String(etag),
 		})
 	}
 	sort.Slice(completed, func(i, j int) bool {
