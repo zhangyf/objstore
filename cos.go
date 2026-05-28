@@ -299,8 +299,12 @@ func (c *cosStore) parseObjectInfo(key string, size int64, etag, lastModified, s
 		ETag: strings.Trim(etag, "\""),
 	}
 	if lastModified != "" {
-		if lm, err := time.Parse(time.RFC1123, lastModified); err == nil {
-			info.LastModified = lm
+		// COS ListObjects 返回 ISO8601 (RFC3339)，HeadObject 返回 RFC1123
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, time.RFC1123} {
+			if lm, err := time.Parse(layout, lastModified); err == nil {
+				info.LastModified = lm
+				break
+			}
 		}
 	}
 	info.StorageClass = storageClass
