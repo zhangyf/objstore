@@ -13,6 +13,13 @@ type ObjectInfo struct {
 	ETag         string
 	LastModified time.Time
 	StorageClass string
+
+	// 以下字段仅 HeadObject 返回，ListObjects 不填充（API 不返回）。
+	ContentType          string            // Content-Type
+	ServerSideEncryption string            // SSE 类型（AES256 / aws:kms / cos/kms）
+	SSEKMSKeyID          string            // SSE-KMS 密钥 ID（仅 sse=*kms* 时）
+	Metadata             map[string]string // 用户自定义元数据（不包含 x-amz-meta-/x-cos-meta- 前缀）
+	VersionID            string            // 对象版本号（启用 versioning 的桌）
 }
 
 // ListOptions 列表查询选项

@@ -114,6 +114,20 @@ func (c *cosStore) HeadObject(ctx context.Context, key string) (*ObjectInfo, err
 		}
 		info.ETag = strings.Trim(resp.Header.Get("ETag"), "\"")
 		info.StorageClass = resp.Header.Get("x-cos-storage-class")
+		info.ContentType = resp.Header.Get("Content-Type")
+		info.ServerSideEncryption = resp.Header.Get("x-cos-server-side-encryption")
+		info.SSEKMSKeyID = resp.Header.Get("x-cos-server-side-encryption-cos-kms-key-id")
+		info.VersionID = resp.Header.Get("x-cos-version-id")
+		// 提取 x-cos-meta-* 自定义元数据
+		const metaPrefix = "X-Cos-Meta-"
+		for name, vals := range resp.Header {
+			if strings.HasPrefix(name, metaPrefix) && len(vals) > 0 {
+				if info.Metadata == nil {
+					info.Metadata = make(map[string]string)
+				}
+				info.Metadata[strings.ToLower(strings.TrimPrefix(name, metaPrefix))] = vals[0]
+			}
+		}
 	}
 	return info, nil
 }
