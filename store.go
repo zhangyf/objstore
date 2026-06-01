@@ -2,6 +2,7 @@ package objstore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 )
@@ -197,3 +198,26 @@ type OptionalUploader interface {
 		fetchPart func(partNumber int, offset, size int64) ([]byte, error), opts *PutOptions) error
 	InitMultipartOpt(ctx context.Context, key string, opts *PutOptions) (uploadID string, err error)
 }
+
+// BucketAdmin 可选的桶级别管理接口。
+// COS / S3 均实现。调用方通过类型断言检测。
+type BucketAdmin interface {
+	// CreateBucket 创建桶。桶名/region 由 Store 初始化时绑定。
+	// 如果桶已存在且为当前用户所有，返回 ErrBucketAlreadyOwnedByYou。
+	// 如果桶已被别人拥有，返回原始错误。
+	CreateBucket(ctx context.Context) error
+
+	// DeleteBucket 删除桶。
+	// 要求桶为空，否则返回原始错误。
+	DeleteBucket(ctx context.Context) error
+
+	// HeadBucket 检查桶是否存在且可访问。
+	// 存在 返回 nil；不存在返回 ErrBucketNotFound；其他错误原样返回。
+	HeadBucket(ctx context.Context) error
+}
+
+// ErrBucketNotFound 桶不存在
+var ErrBucketNotFound = errors.New("bucket not found")
+
+// ErrBucketAlreadyOwnedByYou 桶已存在且为当前用户所有（需依赖 errors.Is 判断）
+var ErrBucketAlreadyOwnedByYou = errors.New("bucket already owned by you")

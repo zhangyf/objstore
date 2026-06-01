@@ -3,6 +3,7 @@ package objstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -70,6 +71,51 @@ func newS3Store(cfg Config) (Store, error) {
 
 func (s *s3Store) Provider() ProviderType { return ProviderS3 }
 func (s *s3Store) BucketName() string { return s.bucket }
+
+// ---- BucketAdmin ----
+
+// CreateBucket 创建当前桶。主要区域 us-east-1 不能指定 LocationConstraint。
+func (s *s3Store) CreateBucket(ctx context.Context) error {
+	input := &s3.CreateBucketInput{Bucket: aws.String(s.bucket)}
+	if s.region != "" && s.region != "us-east-1" {
+		input.CreateBucketConfiguration = &s3types.CreateBucketConfiguration{
+			LocationConstraint: s3types.BucketLocationConstraint(s.region),
+		}
+	}
+	_, err := s.inner.CreateBucket(ctx, input)
+	if err == nil {
+		return nil
+	}
+	var already *s3types.BucketAlreadyOwnedByYou
+	if errors.As(err, &already) {
+		return ErrBucketAlreadyOwnedByYou
+	}
+	return err
+}
+
+// DeleteBucket 删除当前桶。要求桶为空。
+func (s *s3Store) DeleteBucket(ctx context.Context) error {
+	_, err := s.inner.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(s.bucket)})
+	return err
+}
+
+// HeadBucket 检查当前桶是否存在且可访问。
+func (s *s3Store) HeadBucket(ctx context.Context) error {
+	_, err := s.inner.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(s.bucket)})
+	if err != nil {
+		var nf *s3types.NoSuchBucket
+		if errors.As(err, &nf) {
+			return ErrBucketNotFound
+		}
+		// 404 不一定走 NoSuchBucket（可能是 apierr 404 string）
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NotFound") {
+			return ErrBucketNotFound
+		}
+		return err
+	}
+	return nil
+}
+
 
 // ---- 元信息 ----
 
