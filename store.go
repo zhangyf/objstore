@@ -44,6 +44,20 @@ type PutOptions struct {
 
 	// 对象 Tag (URL-safe key=value)。S3 走 x-amz-tagging，COS 走 x-cos-tagging。
 	Tags map[string]string
+
+	// 服务端加密 (SSE，issue #5)。
+	//
+	// SSE 可取值：
+	//   ""             不加密（默认）
+	//   "AES256"       服务端使用 厂商托管密钥 (S3:SSE-S3 / COS:SSE-COS)
+	//   "aws:kms"      S3 专用、使用 KMS（SSE-KMS）
+	//   "cos/kms"      COS 专用、使用 KMS（SSE-KMS）
+	//
+	// SSEKMSKeyID 在 SSE 为 kms 类型时可选：
+	//   - S3   填 CMK ID/ARN/Alias，为空走账号 default key
+	//   - COS  填 CMK ID（UUID），为空走默认 CMK
+	SSE         string
+	SSEKMSKeyID string
 }
 
 // HasAny 返回是否含任意一项设置，默认 nil 表示什么都不传。
@@ -52,7 +66,8 @@ func (o *PutOptions) HasAny() bool {
 		return false
 	}
 	return o.ContentType != "" || o.CacheControl != "" || o.StorageClass != "" ||
-		o.ACL != "" || len(o.Metadata) > 0 || len(o.Tags) > 0
+		o.ACL != "" || len(o.Metadata) > 0 || len(o.Tags) > 0 ||
+		o.SSE != "" || o.SSEKMSKeyID != ""
 }
 
 // Store 统一对象存储接口，COS / S3 各自实现

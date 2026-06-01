@@ -717,9 +717,18 @@ func buildCosPutHeader(opts *PutOptions, contentLength int64) *cos.ObjectPutHead
 			h.XCosMetaXXX = &meta
 		}
 		// Tag 由 x-cos-tagging 透传，SDK 本身不暴露专用字段，走 XOptionHeader
+		// SSE 同理，COS SDK 没有 SSE 专用字段，透传 x-cos-server-side-encryption。
+		extra := http.Header{}
 		if len(opts.Tags) > 0 {
-			extra := http.Header{}
 			extra.Set("x-cos-tagging", encodeTagging(opts.Tags))
+		}
+		if opts.SSE != "" {
+			extra.Set("x-cos-server-side-encryption", opts.SSE)
+			if (opts.SSE == "cos/kms" || opts.SSE == "aws:kms") && opts.SSEKMSKeyID != "" {
+				extra.Set("x-cos-server-side-encryption-cos-kms-key-id", opts.SSEKMSKeyID)
+			}
+		}
+		if len(extra) > 0 {
 			h.XOptionHeader = &extra
 		}
 	}

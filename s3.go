@@ -624,6 +624,12 @@ func applyS3PutOptions(input *s3.PutObjectInput, opts *PutOptions) {
 	if len(opts.Tags) > 0 {
 		input.Tagging = aws.String(encodeS3Tagging(opts.Tags))
 	}
+	if opts.SSE != "" {
+		input.ServerSideEncryption = s3types.ServerSideEncryption(opts.SSE)
+		if opts.SSEKMSKeyID != "" {
+			input.SSEKMSKeyId = aws.String(opts.SSEKMSKeyID)
+		}
+	}
 	if len(opts.Metadata) > 0 {
 		m := make(map[string]string, len(opts.Metadata))
 		for k, v := range opts.Metadata {
@@ -652,6 +658,12 @@ func applyS3CreateMultipart(input *s3.CreateMultipartUploadInput, opts *PutOptio
 	}
 	if len(opts.Tags) > 0 {
 		input.Tagging = aws.String(encodeS3Tagging(opts.Tags))
+	}
+	if opts.SSE != "" {
+		input.ServerSideEncryption = s3types.ServerSideEncryption(opts.SSE)
+		if opts.SSEKMSKeyID != "" {
+			input.SSEKMSKeyId = aws.String(opts.SSEKMSKeyID)
+		}
 	}
 	if len(opts.Metadata) > 0 {
 		m := make(map[string]string, len(opts.Metadata))
