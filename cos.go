@@ -103,14 +103,17 @@ func (c *cosStore) BucketName() string  { return c.bucket }
 // CreateBucket 创建当前桶
 func (c *cosStore) CreateBucket(ctx context.Context) error {
 	c.logOperation("CreateBucket", "")
-	_, err := c.inner.Bucket.Put(ctx, nil)
+	resp, err := c.inner.Bucket.Put(ctx, nil)
 	if err == nil {
 		return nil
 	}
-	// COS 返回不同错误码，识别“桶已存在且为当前用户所有”
-	//   BucketAlreadyOwnedByYou
-	if strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") {
-		return ErrBucketAlreadyOwnedByYou
+	// 409 在 COS 表示桶名已占用（可能是你刚创建过，也可能是别人占名），
+	// 需额外 Head 一下来区分。
+	if resp != nil && resp.StatusCode == http.StatusConflict {
+		if headErr := c.HeadBucket(ctx); headErr == nil {
+			return ErrBucketAlreadyOwnedByYou
+		}
+		// Head 失败 → 这个名字你不拥有，使用原始 error。
 	}
 	return err
 }
