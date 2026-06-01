@@ -88,8 +88,18 @@ func (s *s3Store) HeadObject(ctx context.Context, key string) (*ObjectInfo, erro
 	if resp.LastModified != nil {
 		info.LastModified = *resp.LastModified
 	}
-	info.ETag = aws.ToString(resp.ETag)
+	info.ETag = strings.Trim(aws.ToString(resp.ETag), "\"")
 	info.StorageClass = string(resp.StorageClass)
+	info.ContentType = aws.ToString(resp.ContentType)
+	info.ServerSideEncryption = string(resp.ServerSideEncryption)
+	info.SSEKMSKeyID = aws.ToString(resp.SSEKMSKeyId)
+	info.VersionID = aws.ToString(resp.VersionId)
+	if len(resp.Metadata) > 0 {
+		info.Metadata = make(map[string]string, len(resp.Metadata))
+		for k, v := range resp.Metadata {
+			info.Metadata[strings.ToLower(k)] = v
+		}
+	}
 	return info, nil
 }
 
