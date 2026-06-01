@@ -26,13 +26,30 @@ type s3Store struct {
 }
 
 func newS3Store(cfg Config) (Store, error) {
-	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
-		awsconfig.WithRegion(cfg.Region),
-		awsconfig.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(cfg.SecretID, cfg.SecretKey, ""),
-		),
+	loadOpts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithClientLogMode(0),
-	)
+	}
+	if cfg.Region != "" {
+		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.Region))
+	}
+
+	// 凭证解析：
+	//   - SecretID/SecretKey 都给 → 静态凭证（保持向后兼容）。
+	//   - 否则走 awssdk default credential chain：
+	//       env → shared credentials/profile → container creds → IMDS → STS AssumeRole
+	//   - 指定 Profile 时只走该 profile（含 source_profile/AssumeRole 链）。
+	switch {
+	case cfg.SecretID != "" && cfg.SecretKey != "":
+		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(cfg.SecretID, cfg.SecretKey, ""),
+		))
+	case cfg.SecretID != "" || cfg.SecretKey != "":
+		return nil, fmt.Errorf("s3 config: SecretID 与 SecretKey 必须同时提供（或同时为空走 default credential chain）")
+	case cfg.Profile != "":
+		loadOpts = append(loadOpts, awsconfig.WithSharedConfigProfile(cfg.Profile))
+	}
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), loadOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("s3 config: %w", err)
 	}
