@@ -98,6 +98,44 @@ func newCOSStore(cfg Config) (Store, error) {
 func (c *cosStore) Provider() ProviderType { return ProviderCOS }
 func (c *cosStore) BucketName() string  { return c.bucket }
 
+// ---- BucketAdmin ----
+
+// CreateBucket 创建当前桶
+func (c *cosStore) CreateBucket(ctx context.Context) error {
+	c.logOperation("CreateBucket", "")
+	_, err := c.inner.Bucket.Put(ctx, nil)
+	if err == nil {
+		return nil
+	}
+	// COS 返回不同错误码，识别“桶已存在且为当前用户所有”
+	//   BucketAlreadyOwnedByYou
+	if strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") {
+		return ErrBucketAlreadyOwnedByYou
+	}
+	return err
+}
+
+// DeleteBucket 删除当前桶。要求桶为空。
+func (c *cosStore) DeleteBucket(ctx context.Context) error {
+	c.logOperation("DeleteBucket", "")
+	_, err := c.inner.Bucket.Delete(ctx)
+	return err
+}
+
+// HeadBucket 检查当前桶是否存在且可访问。
+func (c *cosStore) HeadBucket(ctx context.Context) error {
+	c.logOperation("HeadBucket", "")
+	resp, err := c.inner.Bucket.Head(ctx)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return ErrBucketNotFound
+		}
+		return err
+	}
+	return nil
+}
+
+
 // ---- 元信息 ----
 
 func (c *cosStore) HeadObject(ctx context.Context, key string) (*ObjectInfo, error) {
