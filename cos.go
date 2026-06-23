@@ -19,13 +19,28 @@ import (
 	cos "github.com/tencentyun/cos-go-sdk-v5"
 )
 
-
 type cosStore struct {
 	inner     *cos.Client
 	bucket    string
 	region    string
+	host      string // COS 域名后缀，如 cos.ap-tokyo.myqcloud.com（不含 bucket 前缀）
 	secretID  string
 	secretKey string
+}
+
+// cosHost 计算 COS 域名后缀（不含 bucket）。
+// endpoint 为空时默认走公网 cos.<region>.myqcloud.com；
+// 显式传入时可带 scheme（会被剔除）、尾部斜杠。
+// 示例："cos-internal.ap-tokyo.tencentcos.cn" 或 "cos.ap-beijing.myqcloud.com"。
+func cosHost(region, endpoint string) string {
+	ep := strings.TrimSpace(endpoint)
+	if ep == "" {
+		return fmt.Sprintf("cos.%s.myqcloud.com", region)
+	}
+	ep = strings.TrimPrefix(ep, "https://")
+	ep = strings.TrimPrefix(ep, "http://")
+	ep = strings.TrimRight(ep, "/")
+	return ep
 }
 
 // logOperation 记录操作日志，根据 Debug 标志决定是否输出
@@ -33,20 +48,20 @@ func (c *cosStore) logOperation(op, key string, extra ...string) {
 	if !COSDebug {
 		return // 调试模式关闭时不记录详细操作
 	}
-	
+
 	// 生成完整 URL
 	var fullURL string
 	if key == "" && (op == "ListObjects" || op == "ListObjectsWithSize") {
 		// 对于列表操作，不显示 key，但可以显示 base URL
-		fullURL = fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn/", c.bucket, c.region)
+		fullURL = fmt.Sprintf("https://%s.%s/", c.bucket, c.host)
 	} else if key == "" {
 		// 没有 key 的情况
-		fullURL = fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn/", c.bucket, c.region)
+		fullURL = fmt.Sprintf("https://%s.%s/", c.bucket, c.host)
 	} else {
 		// 有 key 的情况，构建完整对象 URL
-		fullURL = fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn/%s", c.bucket, c.region, key)
+		fullURL = fmt.Sprintf("https://%s.%s/%s", c.bucket, c.host, key)
 	}
-	
+
 	msg := fmt.Sprintf("[objstore] DEBUG %s: URL=%s, bucket=%s, region=%s, key=%s", op, fullURL, c.bucket, c.region, key)
 	if len(extra) > 0 {
 		msg += ", " + strings.Join(extra, ", ")
@@ -74,7 +89,8 @@ func init() {
 }
 
 func newCOSStore(cfg Config) (Store, error) {
-	u, err := url.Parse(fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn", cfg.Bucket, cfg.Region))
+	host := cosHost(cfg.Region, cfg.Endpoint)
+	u, err := url.Parse(fmt.Sprintf("https://%s.%s", cfg.Bucket, host))
 	if err != nil {
 		return nil, err
 	}
@@ -92,11 +108,11 @@ func newCOSStore(cfg Config) (Store, error) {
 			},
 		},
 	})
-	return &cosStore{inner: inner, bucket: cfg.Bucket, region: cfg.Region, secretID: cfg.SecretID, secretKey: cfg.SecretKey}, nil
+	return &cosStore{inner: inner, bucket: cfg.Bucket, region: cfg.Region, host: host, secretID: cfg.SecretID, secretKey: cfg.SecretKey}, nil
 }
 
 func (c *cosStore) Provider() ProviderType { return ProviderCOS }
-func (c *cosStore) BucketName() string  { return c.bucket }
+func (c *cosStore) BucketName() string     { return c.bucket }
 
 // ---- BucketAdmin ----
 
@@ -137,7 +153,6 @@ func (c *cosStore) HeadBucket(ctx context.Context) error {
 	}
 	return nil
 }
-
 
 // ---- 元信息 ----
 
@@ -187,7 +202,7 @@ func (c *cosStore) ListObjects(ctx context.Context, opts ListOptions) ([]ObjectI
 func (c *cosStore) listWithDelimiter(ctx context.Context, prefix string, delimiter string) ([]ObjectInfo, error) {
 	var result []ObjectInfo
 	marker := ""
-	baseURL := fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn", c.bucket, c.region)
+	baseURL := fmt.Sprintf("https://%s.%s", c.bucket, c.host)
 
 	for {
 		u, err := url.Parse(baseURL + "/")
@@ -209,7 +224,7 @@ func (c *cosStore) listWithDelimiter(ctx context.Context, prefix string, delimit
 		}
 
 		type bucketListResult struct {
-			Contents       []struct {
+			Contents []struct {
 				Key          string `xml:"Key"`
 				Size         int64  `xml:"Size"`
 				ETag         string `xml:"ETag"`
@@ -268,7 +283,7 @@ func (c *cosStore) listWithCommonPrefixes(ctx context.Context, prefix string) ([
 	var result []ObjectInfo
 	var prefixes []string
 	marker := ""
-	baseURL := fmt.Sprintf("https://%s.cos-internal.%s.tencentcos.cn", c.bucket, c.region)
+	baseURL := fmt.Sprintf("https://%s.%s", c.bucket, c.host)
 
 	for {
 		u, err := url.Parse(baseURL + "/")
@@ -290,7 +305,7 @@ func (c *cosStore) listWithCommonPrefixes(ctx context.Context, prefix string) ([
 		}
 
 		type bucketListResult struct {
-			Contents       []struct {
+			Contents []struct {
 				Key          string `xml:"Key"`
 				Size         int64  `xml:"Size"`
 				ETag         string `xml:"ETag"`
@@ -527,7 +542,7 @@ func (c *cosStore) CopyObject(ctx context.Context, dstKey string, src ServerCopi
 	if !ok {
 		return fmt.Errorf("COS CopyObject: src must also be a COS store")
 	}
-	srcURL := fmt.Sprintf("%s.cos-internal.%s.tencentcos.cn/%s", srcStore.bucket, srcStore.region, srcKey)
+	srcURL := fmt.Sprintf("%s.%s/%s", srcStore.bucket, srcStore.host, srcKey)
 	c.logOperation("CopyObject", dstKey, fmt.Sprintf("src=%s", srcURL))
 	_, _, err := c.inner.Object.Copy(ctx, dstKey, srcURL, nil)
 	return err
@@ -544,7 +559,7 @@ func (c *cosStore) CopyPartFrom(ctx context.Context, dstKey string, src ServerCo
 	}
 
 	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
-	srcURL := fmt.Sprintf("%s.cos-internal.%s.tencentcos.cn/%s", srcStore.bucket, srcStore.region, srcKey)
+	srcURL := fmt.Sprintf("%s.%s/%s", srcStore.bucket, srcStore.host, srcKey)
 	c.logOperation("CopyPartFrom", dstKey, fmt.Sprintf("src=%s, totalSize=%d, chunks=%d", srcURL, totalSize, totalParts))
 
 	initResp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, dstKey, nil)
