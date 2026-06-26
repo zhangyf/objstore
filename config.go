@@ -31,10 +31,29 @@ type Config struct {
 	// Profile 仅 S3 生效：从 ~/.aws/credentials / ~/.aws/config 加载指定 profile。
 	// 仅当 SecretID/SecretKey 都为空时生效。空字符串 = 不指定（走 default chain）。
 	Profile string
+
+	// SSECustomerKey 启用 SSE-C（Server-Side Encryption with Customer-provided keys）。
+	//
+	// 取值：32 字节（256-bit）AES 原始密钥；nil 或长度 0 表示不启用 SSE-C。
+	// 一旦非空，长度必须恰好 32 字节，否则 New 返回错误。
+	//
+	// SSE-C 与普通 SSE（PutOptions.SSE / SSEKMSKeyID）互斥：启用 SSE-C 时
+	// 上传不再设 x-cos-server-side-encryption / ServerSideEncryption。
+	//
+	// SSE-C 密钥绑在 Store 实例上，同一个加密桶的所有读写（上传/下载/Head/
+	// 分块每个 part/拷贝）共用同一把密钥，由 Store 在各路径自动注入三个 header：
+	//   COS:  x-cos-server-side-encryption-customer-algorithm / -key / -key-MD5
+	//   S3:   x-amz-server-side-encryption-customer-algorithm / -key / -key-MD5
+	//
+	// 注意：SSE-C 要求 HTTPS（COS/S3 均强制）。
+	SSECustomerKey []byte
 }
 
 // New 根据 Config 创建对应的 Store 实现
 func New(cfg Config) (Store, error) {
+	if len(cfg.SSECustomerKey) != 0 && len(cfg.SSECustomerKey) != 32 {
+		return nil, fmt.Errorf("objstore: SSECustomerKey 必须恰好 32 字节（当前 %d 字节）", len(cfg.SSECustomerKey))
+	}
 	switch cfg.Provider {
 	case ProviderCOS:
 		return newCOSStore(cfg)

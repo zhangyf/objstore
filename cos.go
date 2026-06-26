@@ -26,6 +26,7 @@ type cosStore struct {
 	host      string // COS 域名后缀，如 cos.ap-tokyo.myqcloud.com（不含 bucket 前缀）
 	secretID  string
 	secretKey string
+	ssec      *sseCustomerKey // SSE-C 客户密钥，nil 表示未启用
 }
 
 // cosHost 计算 COS 域名后缀（不含 bucket）。
@@ -108,11 +109,137 @@ func newCOSStore(cfg Config) (Store, error) {
 			},
 		},
 	})
-	return &cosStore{inner: inner, bucket: cfg.Bucket, region: cfg.Region, host: host, secretID: cfg.SecretID, secretKey: cfg.SecretKey}, nil
+	var ssec *sseCustomerKey
+	if len(cfg.SSECustomerKey) == 32 {
+		ssec = newSSECustomerKey(cfg.SSECustomerKey)
+	}
+	return &cosStore{inner: inner, bucket: cfg.Bucket, region: cfg.Region, host: host, secretID: cfg.SecretID, secretKey: cfg.SecretKey, ssec: ssec}, nil
 }
 
 func (c *cosStore) Provider() ProviderType { return ProviderCOS }
 func (c *cosStore) BucketName() string     { return c.bucket }
+
+// ---- SSE-C header 注入辅助 ----
+
+// applySSECGet 给 ObjectGetOptions 注入 SSE-C 三个 header（启用时）。
+// 返回可能新建的 opt（入参为 nil 且启用 SSE-C 时）。
+func (c *cosStore) applySSECGet(opt *cos.ObjectGetOptions) *cos.ObjectGetOptions {
+	if c.ssec == nil {
+		return opt
+	}
+	if opt == nil {
+		opt = &cos.ObjectGetOptions{}
+	}
+	opt.XCosSSECustomerAglo = c.ssec.algo()
+	opt.XCosSSECustomerKey = c.ssec.keyB64
+	opt.XCosSSECustomerKeyMD5 = c.ssec.md5B64
+	return opt
+}
+
+// applySSECHead 给 ObjectHeadOptions 注入 SSE-C header（启用时）。
+func (c *cosStore) applySSECHead(opt *cos.ObjectHeadOptions) *cos.ObjectHeadOptions {
+	if c.ssec == nil {
+		return opt
+	}
+	if opt == nil {
+		opt = &cos.ObjectHeadOptions{}
+	}
+	opt.XCosSSECustomerAglo = c.ssec.algo()
+	opt.XCosSSECustomerKey = c.ssec.keyB64
+	opt.XCosSSECustomerKeyMD5 = c.ssec.md5B64
+	return opt
+}
+
+// applySSECPutHeader 给 ObjectPutHeaderOptions 注入 SSE-C header（启用时）。
+// 用于单次上传 / multipart Init。
+func (c *cosStore) applySSECPutHeader(h *cos.ObjectPutHeaderOptions) *cos.ObjectPutHeaderOptions {
+	if c.ssec == nil {
+		return h
+	}
+	if h == nil {
+		h = &cos.ObjectPutHeaderOptions{}
+	}
+	h.XCosSSECustomerAglo = c.ssec.algo()
+	h.XCosSSECustomerKey = c.ssec.keyB64
+	h.XCosSSECustomerKeyMD5 = c.ssec.md5B64
+	return h
+}
+
+// applySSECUploadPart 给 ObjectUploadPartOptions 注入 SSE-C header（启用时）。
+func (c *cosStore) applySSECUploadPart(opt *cos.ObjectUploadPartOptions) *cos.ObjectUploadPartOptions {
+	if c.ssec == nil {
+		return opt
+	}
+	if opt == nil {
+		opt = &cos.ObjectUploadPartOptions{}
+	}
+	opt.XCosSSECustomerAglo = c.ssec.algo()
+	opt.XCosSSECustomerKey = c.ssec.keyB64
+	opt.XCosSSECustomerKeyMD5 = c.ssec.md5B64
+	return opt
+}
+
+// putOptWithSSEC 为上传构造 ObjectPutOptions，启用 SSE-C 时注入 header；
+// 未启用时原样返回传入的 opt。
+func (c *cosStore) putOptWithSSEC(opt *cos.ObjectPutOptions) *cos.ObjectPutOptions {
+	if c.ssec == nil {
+		return opt
+	}
+	if opt == nil {
+		opt = &cos.ObjectPutOptions{}
+	}
+	opt.ObjectPutHeaderOptions = c.applySSECPutHeader(opt.ObjectPutHeaderOptions)
+	return opt
+}
+
+// initOptWithSSEC 为 multipart Init 构造 InitiateMultipartUploadOptions，启用 SSE-C 时注入 header。
+func (c *cosStore) initOptWithSSEC(opt *cos.InitiateMultipartUploadOptions) *cos.InitiateMultipartUploadOptions {
+	if c.ssec == nil {
+		return opt
+	}
+	if opt == nil {
+		opt = &cos.InitiateMultipartUploadOptions{}
+	}
+	opt.ObjectPutHeaderOptions = c.applySSECPutHeader(opt.ObjectPutHeaderOptions)
+	return opt
+}
+
+// copyOptWithSSEC 为服务端 Copy 构造 ObjectCopyOptions：
+//   - 本 store（目标）启用 SSE-C 时，注入目标 SSE-C header；
+//   - srcStore（源）启用 SSE-C 时，注入 copy-source SSE-C header。
+// 两者均未启用时返回 nil。
+func (c *cosStore) copyOptWithSSEC(srcStore *cosStore) *cos.ObjectCopyOptions {
+	if c.ssec == nil && srcStore.ssec == nil {
+		return nil
+	}
+	h := &cos.ObjectCopyHeaderOptions{}
+	if c.ssec != nil {
+		h.XCosSSECustomerAglo = c.ssec.algo()
+		h.XCosSSECustomerKey = c.ssec.keyB64
+		h.XCosSSECustomerKeyMD5 = c.ssec.md5B64
+	}
+	if srcStore.ssec != nil {
+		h.XCosCopySourceSSECustomerAglo = srcStore.ssec.algo()
+		h.XCosCopySourceSSECustomerKey = srcStore.ssec.keyB64
+		h.XCosCopySourceSSECustomerKeyMD5 = srcStore.ssec.md5B64
+	}
+	return &cos.ObjectCopyOptions{ObjectCopyHeaderOptions: h}
+}
+
+// copyPartOptWithSSEC 为服务端 CopyPart 注入 SSE-C copy-source header（src 启用时）。
+// 目标的 SSE-C 由 Init 决定（参见 initOptWithSSEC），这里只需处理源端。
+func (c *cosStore) copyPartOptWithSSEC(srcStore *cosStore, opt *cos.ObjectCopyPartOptions) *cos.ObjectCopyPartOptions {
+	if srcStore.ssec == nil {
+		return opt
+	}
+	if opt == nil {
+		opt = &cos.ObjectCopyPartOptions{}
+	}
+	opt.XCosCopySourceSSECustomerAglo = srcStore.ssec.algo()
+	opt.XCosCopySourceSSECustomerKey = srcStore.ssec.keyB64
+	opt.XCosCopySourceSSECustomerKeyMD5 = srcStore.ssec.md5B64
+	return opt
+}
 
 // ---- BucketAdmin ----
 
@@ -158,7 +285,7 @@ func (c *cosStore) HeadBucket(ctx context.Context) error {
 
 func (c *cosStore) HeadObject(ctx context.Context, key string) (*ObjectInfo, error) {
 	c.logOperation("HeadObject", key)
-	resp, err := c.inner.Object.Head(ctx, key, nil)
+	resp, err := c.inner.Object.Head(ctx, key, c.applySSECHead(nil))
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +513,7 @@ func (c *cosStore) parseObjectInfo(key string, size int64, etag, lastModified, s
 
 func (c *cosStore) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
 	c.logOperation("GetObject", key)
-	resp, err := c.inner.Object.Get(ctx, key, nil)
+	resp, err := c.inner.Object.Get(ctx, key, c.applySSECGet(nil))
 	if err != nil {
 		return nil, err
 	}
@@ -395,9 +522,9 @@ func (c *cosStore) GetObject(ctx context.Context, key string) (io.ReadCloser, er
 
 func (c *cosStore) GetRange(ctx context.Context, key string, start, end int64) ([]byte, error) {
 	c.logOperation("GetRange", key, fmt.Sprintf("range=%d-%d", start, end))
-	resp, err := c.inner.Object.Get(ctx, key, &cos.ObjectGetOptions{
+	resp, err := c.inner.Object.Get(ctx, key, c.applySSECGet(&cos.ObjectGetOptions{
 		Range: fmt.Sprintf("bytes=%d-%d", start, end),
-	})
+	}))
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +534,7 @@ func (c *cosStore) GetRange(ctx context.Context, key string, start, end int64) (
 
 func (c *cosStore) GetAll(ctx context.Context, key string) ([]byte, error) {
 	c.logOperation("GetAll", key)
-	resp, err := c.inner.Object.Get(ctx, key, nil)
+	resp, err := c.inner.Object.Get(ctx, key, c.applySSECGet(nil))
 	if err != nil {
 		return nil, err
 	}
@@ -419,7 +546,7 @@ func (c *cosStore) GetAll(ctx context.Context, key string) ([]byte, error) {
 
 func (c *cosStore) PutObject(ctx context.Context, key string, data []byte) error {
 	c.logOperation("PutObject", key, fmt.Sprintf("size=%d", len(data)))
-	_, err := c.inner.Object.Put(ctx, key, bytes.NewReader(data), nil)
+	_, err := c.inner.Object.Put(ctx, key, bytes.NewReader(data), c.putOptWithSSEC(nil))
 	return err
 }
 
@@ -431,6 +558,7 @@ func (c *cosStore) PutObjectStream(ctx context.Context, key string, r io.Reader,
 			ContentLength: size,
 		}
 	}
+	opt = c.putOptWithSSEC(opt)
 	_, err := c.inner.Object.Put(ctx, key, r, opt)
 	return err
 }
@@ -441,7 +569,7 @@ func (c *cosStore) MultipartUpload(ctx context.Context, key string, totalSize, c
 	fetchPart func(partNumber int, offset, size int64) ([]byte, error)) error {
 
 	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
-	initResp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, key, nil)
+	initResp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, key, c.initOptWithSSEC(nil))
 	if err != nil {
 		return fmt.Errorf("InitiateMultipartUpload: %w", err)
 	}
@@ -471,7 +599,7 @@ func (c *cosStore) MultipartUpload(ctx context.Context, key string, totalSize, c
 					results <- partResult{pn, "", fmt.Errorf("fetchPart %d: %w", pn, err)}
 					continue
 				}
-				resp, err := c.inner.Object.UploadPart(ctx, key, uploadID, pn, bytes.NewReader(data), nil)
+				resp, err := c.inner.Object.UploadPart(ctx, key, uploadID, pn, bytes.NewReader(data), c.applySSECUploadPart(nil))
 				if err != nil {
 					results <- partResult{pn, "", fmt.Errorf("UploadPart %d: %w", pn, err)}
 					continue
@@ -544,7 +672,7 @@ func (c *cosStore) CopyObject(ctx context.Context, dstKey string, src ServerCopi
 	}
 	srcURL := fmt.Sprintf("%s.%s/%s", srcStore.bucket, srcStore.host, srcKey)
 	c.logOperation("CopyObject", dstKey, fmt.Sprintf("src=%s", srcURL))
-	_, _, err := c.inner.Object.Copy(ctx, dstKey, srcURL, nil)
+	_, _, err := c.inner.Object.Copy(ctx, dstKey, srcURL, c.copyOptWithSSEC(srcStore))
 	return err
 }
 
@@ -562,7 +690,7 @@ func (c *cosStore) CopyPartFrom(ctx context.Context, dstKey string, src ServerCo
 	srcURL := fmt.Sprintf("%s.%s/%s", srcStore.bucket, srcStore.host, srcKey)
 	c.logOperation("CopyPartFrom", dstKey, fmt.Sprintf("src=%s, totalSize=%d, chunks=%d", srcURL, totalSize, totalParts))
 
-	initResp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, dstKey, nil)
+	initResp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, dstKey, c.initOptWithSSEC(nil))
 	if err != nil {
 		return fmt.Errorf("InitiateMultipartUpload: %w", err)
 	}
@@ -588,10 +716,10 @@ func (c *cosStore) CopyPartFrom(ctx context.Context, dstKey string, src ServerCo
 					end = totalSize - 1
 				}
 				resp, _, err := c.inner.Object.CopyPart(ctx, dstKey, uploadID, pn, srcURL,
-					&cos.ObjectCopyPartOptions{
+					c.copyPartOptWithSSEC(srcStore, &cos.ObjectCopyPartOptions{
 						XCosCopySource:      srcURL,
 						XCosCopySourceRange: fmt.Sprintf("bytes=%d-%d", start, end),
-					})
+					}))
 				if err != nil {
 					results <- partResult{pn, "", fmt.Errorf("CopyPart %d: %w", pn, err)}
 					continue
@@ -639,7 +767,7 @@ func (c *cosStore) CopyPartFrom(ctx context.Context, dstKey string, src ServerCo
 // InitMultipart 初始化一个分块上传，返回 uploadID
 func (c *cosStore) InitMultipart(ctx context.Context, key string) (string, error) {
 	c.logOperation("InitMultipart", key, "")
-	resp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, key, nil)
+	resp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, key, c.initOptWithSSEC(nil))
 	if err != nil {
 		return "", fmt.Errorf("cos InitMultipart: %w", err)
 	}
@@ -681,7 +809,7 @@ func (c *cosStore) ListParts(ctx context.Context, key, uploadID string) ([]Uploa
 
 // UploadPartN 上传单个分块，返回 ETag
 func (c *cosStore) UploadPartN(ctx context.Context, key, uploadID string, partNumber int, data []byte) (string, error) {
-	resp, err := c.inner.Object.UploadPart(ctx, key, uploadID, partNumber, bytes.NewReader(data), nil)
+	resp, err := c.inner.Object.UploadPart(ctx, key, uploadID, partNumber, bytes.NewReader(data), c.applySSECUploadPart(nil))
 	if err != nil {
 		return "", fmt.Errorf("cos UploadPart %d: %w", partNumber, err)
 	}
@@ -832,6 +960,7 @@ func (c *cosStore) PutObjectOpt(ctx context.Context, key string, data []byte, op
 			ObjectPutHeaderOptions: buildCosPutHeader(opts, -1),
 		}
 	}
+	putOpt = c.putOptWithSSEC(putOpt) // SSE-C 启用时注入（即使 opts 为空）
 	_, err := c.inner.Object.Put(ctx, key, bytes.NewReader(data), putOpt)
 	return err
 }
@@ -842,6 +971,7 @@ func (c *cosStore) PutObjectStreamOpt(ctx context.Context, key string, r io.Read
 		ACLHeaderOptions:       buildCosACLHeader(opts),
 		ObjectPutHeaderOptions: buildCosPutHeader(opts, size),
 	}
+	putOpt = c.putOptWithSSEC(putOpt)
 	_, err := c.inner.Object.Put(ctx, key, r, putOpt)
 	return err
 }
@@ -855,6 +985,7 @@ func (c *cosStore) InitMultipartOpt(ctx context.Context, key string, opts *PutOp
 			ObjectPutHeaderOptions: buildCosPutHeader(opts, -1),
 		}
 	}
+	initOpt = c.initOptWithSSEC(initOpt) // SSE-C 启用时注入
 	resp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, key, initOpt)
 	if err != nil {
 		return "", fmt.Errorf("cos InitMultipartOpt: %w", err)
@@ -875,6 +1006,7 @@ func (c *cosStore) MultipartUploadOpt(ctx context.Context, key string, totalSize
 			ObjectPutHeaderOptions: buildCosPutHeader(opts, -1),
 		}
 	}
+	initOpt = c.initOptWithSSEC(initOpt) // SSE-C 启用时注入
 	initResp, _, err := c.inner.Object.InitiateMultipartUpload(ctx, key, initOpt)
 	if err != nil {
 		return fmt.Errorf("InitiateMultipartUpload: %w", err)
@@ -905,7 +1037,7 @@ func (c *cosStore) MultipartUploadOpt(ctx context.Context, key string, totalSize
 					results <- partResult{partNumber: pn, err: err}
 					continue
 				}
-				resp, err := c.inner.Object.UploadPart(ctx, key, uploadID, pn, bytes.NewReader(data), nil)
+				resp, err := c.inner.Object.UploadPart(ctx, key, uploadID, pn, bytes.NewReader(data), c.applySSECUploadPart(nil))
 				if err != nil {
 					results <- partResult{partNumber: pn, err: err}
 					continue

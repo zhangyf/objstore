@@ -24,6 +24,7 @@ type s3Store struct {
 	inner  *s3.Client
 	bucket string
 	region string
+	ssec   *sseCustomerKey // SSE-C 客户密钥，nil 表示未启用
 }
 
 func newS3Store(cfg Config) (Store, error) {
@@ -62,15 +63,97 @@ func newS3Store(cfg Config) (Store, error) {
 			o.UsePathStyle = true
 		})
 	}
+	var ssec *sseCustomerKey
+	if len(cfg.SSECustomerKey) == 32 {
+		ssec = newSSECustomerKey(cfg.SSECustomerKey)
+	}
 	return &s3Store{
 		inner:  s3.NewFromConfig(awsCfg, opts...),
 		bucket: cfg.Bucket,
 		region: cfg.Region,
+		ssec:   ssec,
 	}, nil
 }
 
 func (s *s3Store) Provider() ProviderType { return ProviderS3 }
 func (s *s3Store) BucketName() string { return s.bucket }
+
+// ---- SSE-C header 注入辅助 ----
+//
+// S3 SDK 的 SSECustomerKey 传 base64 字符串，SSECustomerKeyMD5 传 base64(md5)。
+
+func (s *s3Store) applySSECGetInput(in *s3.GetObjectInput) {
+	if s.ssec == nil {
+		return
+	}
+	in.SSECustomerAlgorithm = aws.String(s.ssec.algo())
+	in.SSECustomerKey = aws.String(s.ssec.keyB64)
+	in.SSECustomerKeyMD5 = aws.String(s.ssec.md5B64)
+}
+
+func (s *s3Store) applySSECHeadInput(in *s3.HeadObjectInput) {
+	if s.ssec == nil {
+		return
+	}
+	in.SSECustomerAlgorithm = aws.String(s.ssec.algo())
+	in.SSECustomerKey = aws.String(s.ssec.keyB64)
+	in.SSECustomerKeyMD5 = aws.String(s.ssec.md5B64)
+}
+
+func (s *s3Store) applySSECPutInput(in *s3.PutObjectInput) {
+	if s.ssec == nil {
+		return
+	}
+	in.SSECustomerAlgorithm = aws.String(s.ssec.algo())
+	in.SSECustomerKey = aws.String(s.ssec.keyB64)
+	in.SSECustomerKeyMD5 = aws.String(s.ssec.md5B64)
+}
+
+func (s *s3Store) applySSECCreateMultipart(in *s3.CreateMultipartUploadInput) {
+	if s.ssec == nil {
+		return
+	}
+	in.SSECustomerAlgorithm = aws.String(s.ssec.algo())
+	in.SSECustomerKey = aws.String(s.ssec.keyB64)
+	in.SSECustomerKeyMD5 = aws.String(s.ssec.md5B64)
+}
+
+func (s *s3Store) applySSECUploadPart(in *s3.UploadPartInput) {
+	if s.ssec == nil {
+		return
+	}
+	in.SSECustomerAlgorithm = aws.String(s.ssec.algo())
+	in.SSECustomerKey = aws.String(s.ssec.keyB64)
+	in.SSECustomerKeyMD5 = aws.String(s.ssec.md5B64)
+}
+
+// applySSECCopyObject 给 CopyObjectInput 注入目标 SSE-C（本 store）与源 SSE-C（srcStore）header。
+func (s *s3Store) applySSECCopyObject(in *s3.CopyObjectInput, srcStore *s3Store) {
+	if s.ssec != nil {
+		in.SSECustomerAlgorithm = aws.String(s.ssec.algo())
+		in.SSECustomerKey = aws.String(s.ssec.keyB64)
+		in.SSECustomerKeyMD5 = aws.String(s.ssec.md5B64)
+	}
+	if srcStore.ssec != nil {
+		in.CopySourceSSECustomerAlgorithm = aws.String(srcStore.ssec.algo())
+		in.CopySourceSSECustomerKey = aws.String(srcStore.ssec.keyB64)
+		in.CopySourceSSECustomerKeyMD5 = aws.String(srcStore.ssec.md5B64)
+	}
+}
+
+// applySSECUploadPartCopy 给 UploadPartCopyInput 注入目标与源 SSE-C header。
+func (s *s3Store) applySSECUploadPartCopy(in *s3.UploadPartCopyInput, srcStore *s3Store) {
+	if s.ssec != nil {
+		in.SSECustomerAlgorithm = aws.String(s.ssec.algo())
+		in.SSECustomerKey = aws.String(s.ssec.keyB64)
+		in.SSECustomerKeyMD5 = aws.String(s.ssec.md5B64)
+	}
+	if srcStore.ssec != nil {
+		in.CopySourceSSECustomerAlgorithm = aws.String(srcStore.ssec.algo())
+		in.CopySourceSSECustomerKey = aws.String(srcStore.ssec.keyB64)
+		in.CopySourceSSECustomerKeyMD5 = aws.String(srcStore.ssec.md5B64)
+	}
+}
 
 // ---- BucketAdmin ----
 
@@ -120,10 +203,12 @@ func (s *s3Store) HeadBucket(ctx context.Context) error {
 // ---- 元信息 ----
 
 func (s *s3Store) HeadObject(ctx context.Context, key string) (*ObjectInfo, error) {
-	resp, err := s.inner.HeadObject(ctx, &s3.HeadObjectInput{
+	in := &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
-	})
+	}
+	s.applySSECHeadInput(in)
+	resp, err := s.inner.HeadObject(ctx, in)
 	if err != nil {
 		return nil, err
 	}
@@ -196,10 +281,12 @@ func (s *s3Store) ListObjects(ctx context.Context, opts ListOptions) ([]ObjectIn
 // ---- 下载 ----
 
 func (s *s3Store) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
-	resp, err := s.inner.GetObject(ctx, &s3.GetObjectInput{
+	in := &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
-	})
+	}
+	s.applySSECGetInput(in)
+	resp, err := s.inner.GetObject(ctx, in)
 	if err != nil {
 		return nil, err
 	}
@@ -207,11 +294,13 @@ func (s *s3Store) GetObject(ctx context.Context, key string) (io.ReadCloser, err
 }
 
 func (s *s3Store) GetRange(ctx context.Context, key string, start, end int64) ([]byte, error) {
-	resp, err := s.inner.GetObject(ctx, &s3.GetObjectInput{
+	in := &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", start, end)),
-	})
+	}
+	s.applySSECGetInput(in)
+	resp, err := s.inner.GetObject(ctx, in)
 	if err != nil {
 		return nil, err
 	}
@@ -220,10 +309,12 @@ func (s *s3Store) GetRange(ctx context.Context, key string, start, end int64) ([
 }
 
 func (s *s3Store) GetAll(ctx context.Context, key string) ([]byte, error) {
-	resp, err := s.inner.GetObject(ctx, &s3.GetObjectInput{
+	in := &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
-	})
+	}
+	s.applySSECGetInput(in)
+	resp, err := s.inner.GetObject(ctx, in)
 	if err != nil {
 		return nil, err
 	}
@@ -234,11 +325,13 @@ func (s *s3Store) GetAll(ctx context.Context, key string) ([]byte, error) {
 // ---- 上传 ----
 
 func (s *s3Store) PutObject(ctx context.Context, key string, data []byte) error {
-	_, err := s.inner.PutObject(ctx, &s3.PutObjectInput{
+	in := &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(data),
-	})
+	}
+	s.applySSECPutInput(in)
+	_, err := s.inner.PutObject(ctx, in)
 	return err
 }
 
@@ -251,6 +344,7 @@ func (s *s3Store) PutObjectStream(ctx context.Context, key string, r io.Reader, 
 	if size >= 0 {
 		input.ContentLength = aws.Int64(size)
 	}
+	s.applySSECPutInput(input)
 	_, err := s.inner.PutObject(ctx, input)
 	return err
 }
@@ -261,10 +355,12 @@ func (s *s3Store) MultipartUpload(ctx context.Context, key string, totalSize, ch
 	fetchPart func(partNumber int, offset, size int64) ([]byte, error)) error {
 
 	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
-	createResp, err := s.inner.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+	createInput := &s3.CreateMultipartUploadInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
-	})
+	}
+	s.applySSECCreateMultipart(createInput)
+	createResp, err := s.inner.CreateMultipartUpload(ctx, createInput)
 	if err != nil {
 		return fmt.Errorf("CreateMultipartUpload: %w", err)
 	}
@@ -298,13 +394,15 @@ func (s *s3Store) MultipartUpload(ctx context.Context, key string, totalSize, ch
 					results <- partResult{pn, "", fmt.Errorf("fetchPart %d: %w", pn, err)}
 					continue
 				}
-				resp, err := s.inner.UploadPart(ctx, &s3.UploadPartInput{
+				upInput := &s3.UploadPartInput{
 					Bucket:     aws.String(s.bucket),
 					Key:        aws.String(key),
 					UploadId:   aws.String(uploadID),
 					PartNumber: aws.Int32(int32(pn)),
 					Body:       bytes.NewReader(data),
-				})
+				}
+				s.applySSECUploadPart(upInput)
+				resp, err := s.inner.UploadPart(ctx, upInput)
 				if err != nil {
 					results <- partResult{pn, "", fmt.Errorf("UploadPart %d: %w", pn, err)}
 					continue
@@ -401,11 +499,13 @@ func (s *s3Store) CopyObject(ctx context.Context, dstKey string, src ServerCopie
 	if !ok {
 		return fmt.Errorf("S3 CopyObject: src must also be an S3 store")
 	}
-	_, err := s.inner.CopyObject(ctx, &s3.CopyObjectInput{
+	in := &s3.CopyObjectInput{
 		Bucket:     aws.String(s.bucket),
 		Key:        aws.String(dstKey),
 		CopySource: aws.String(srcStore.bucket + "/" + srcKey),
-	})
+	}
+	s.applySSECCopyObject(in, srcStore)
+	_, err := s.inner.CopyObject(ctx, in)
 	return err
 }
 
@@ -421,10 +521,12 @@ func (s *s3Store) CopyPartFrom(ctx context.Context, dstKey string, src ServerCop
 	totalParts := int((totalSize + chunkSize - 1) / chunkSize)
 	copySource := fmt.Sprintf("%s/%s", srcS3.bucket, srcKey)
 
-	createResp, err := s.inner.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+	createInput := &s3.CreateMultipartUploadInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(dstKey),
-	})
+	}
+	s.applySSECCreateMultipart(createInput)
+	createResp, err := s.inner.CreateMultipartUpload(ctx, createInput)
 	if err != nil {
 		return fmt.Errorf("S3 CreateMultipartUpload: %w", err)
 	}
@@ -453,14 +555,16 @@ func (s *s3Store) CopyPartFrom(ctx context.Context, dstKey string, src ServerCop
 				if end >= totalSize {
 					end = totalSize - 1
 				}
-				resp, err := s.inner.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+				copyIn := &s3.UploadPartCopyInput{
 					Bucket:          aws.String(s.bucket),
 					Key:             aws.String(dstKey),
 					UploadId:        aws.String(uploadID),
 					PartNumber:      aws.Int32(int32(pn)),
 					CopySource:      aws.String(copySource),
 					CopySourceRange: aws.String(fmt.Sprintf("bytes=%d-%d", start, end)),
-				})
+				}
+				s.applySSECUploadPartCopy(copyIn, srcS3)
+				resp, err := s.inner.UploadPartCopy(ctx, copyIn)
 				if err != nil {
 					results <- partResult{pn, "", fmt.Errorf("UploadPartCopy %d: %w", pn, err)}
 					continue
@@ -514,10 +618,12 @@ func (s *s3Store) CopyPartFrom(ctx context.Context, dstKey string, src ServerCop
 
 // InitMultipart 初始化一个分块上传，返回 uploadID
 func (s *s3Store) InitMultipart(ctx context.Context, key string) (string, error) {
-	resp, err := s.inner.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+	in := &s3.CreateMultipartUploadInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
-	})
+	}
+	s.applySSECCreateMultipart(in)
+	resp, err := s.inner.CreateMultipartUpload(ctx, in)
 	if err != nil {
 		return "", fmt.Errorf("s3 InitMultipart: %w", err)
 	}
@@ -559,14 +665,16 @@ func (s *s3Store) ListParts(ctx context.Context, key, uploadID string) ([]Upload
 
 // UploadPartN 上传单个分块，返回 ETag
 func (s *s3Store) UploadPartN(ctx context.Context, key, uploadID string, partNumber int, data []byte) (string, error) {
-	resp, err := s.inner.UploadPart(ctx, &s3.UploadPartInput{
+	in := &s3.UploadPartInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(key),
 		UploadId:      aws.String(uploadID),
 		PartNumber:    aws.Int32(int32(partNumber)),
 		Body:          bytes.NewReader(data),
 		ContentLength: aws.Int64(int64(len(data))),
-	})
+	}
+	s.applySSECUploadPart(in)
+	resp, err := s.inner.UploadPart(ctx, in)
 	if err != nil {
 		return "", fmt.Errorf("s3 UploadPart %d: %w", partNumber, err)
 	}
@@ -746,6 +854,7 @@ func (s *s3Store) PutObjectOpt(ctx context.Context, key string, data []byte, opt
 		Body:   bytes.NewReader(data),
 	}
 	applyS3PutOptions(input, opts)
+	s.applySSECPutInput(input) // SSE-C 启用时注入
 	_, err := s.inner.PutObject(ctx, input)
 	return err
 }
@@ -760,6 +869,7 @@ func (s *s3Store) PutObjectStreamOpt(ctx context.Context, key string, r io.Reade
 		input.ContentLength = aws.Int64(size)
 	}
 	applyS3PutOptions(input, opts)
+	s.applySSECPutInput(input)
 	_, err := s.inner.PutObject(ctx, input)
 	return err
 }
@@ -770,6 +880,7 @@ func (s *s3Store) InitMultipartOpt(ctx context.Context, key string, opts *PutOpt
 		Key:    aws.String(key),
 	}
 	applyS3CreateMultipart(input, opts)
+	s.applySSECCreateMultipart(input)
 	resp, err := s.inner.CreateMultipartUpload(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("s3 InitMultipartOpt: %w", err)
@@ -790,6 +901,7 @@ func (s *s3Store) MultipartUploadOpt(ctx context.Context, key string, totalSize,
 		Key:    aws.String(key),
 	}
 	applyS3CreateMultipart(createInput, opts)
+	s.applySSECCreateMultipart(createInput)
 	createResp, err := s.inner.CreateMultipartUpload(ctx, createInput)
 	if err != nil {
 		return fmt.Errorf("CreateMultipartUpload: %w", err)
@@ -826,14 +938,16 @@ func (s *s3Store) MultipartUploadOpt(ctx context.Context, key string, totalSize,
 					results <- partResult{partNumber: pn, err: err}
 					continue
 				}
-				upResp, err := s.inner.UploadPart(ctx, &s3.UploadPartInput{
+				upInput := &s3.UploadPartInput{
 					Bucket:        aws.String(s.bucket),
 					Key:           aws.String(key),
 					UploadId:      aws.String(uploadID),
 					PartNumber:    aws.Int32(int32(pn)),
 					Body:          bytes.NewReader(data),
 					ContentLength: aws.Int64(int64(len(data))),
-				})
+				}
+				s.applySSECUploadPart(upInput)
+				upResp, err := s.inner.UploadPart(ctx, upInput)
 				if err != nil {
 					results <- partResult{partNumber: pn, err: err}
 					continue
