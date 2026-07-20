@@ -12,6 +12,8 @@ func TestBucketAdminInterface_Coverage(t *testing.T) {
 	// 编译期校验：cosStore / s3Store 都实现 BucketAdminOpt
 	var _ BucketAdminOpt = (*cosStore)(nil)
 	var _ BucketAdminOpt = (*s3Store)(nil)
+	// 编译期校验：cosStore 实现 ObjectQueryGetter（S3 不支持）
+	var _ ObjectQueryGetter = (*cosStore)(nil)
 }
 
 func TestBucketSentinelErrors(t *testing.T) {

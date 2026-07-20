@@ -259,6 +259,14 @@ type BucketAdminOpt interface {
 	CreateBucketOpt(ctx context.Context, opts *CreateBucketOptions) error
 }
 
+// ObjectQueryGetter 可选接口：带自定义 query string 下载对象。
+// 典型场景是 COS 数据万象（CI）图片处理：将处理参数作为 query 传入，
+// 如 "imageMogr2/thumbnail/200x300/format/webp"。
+// 仅 COS 实现；S3 不支持此能力。
+type ObjectQueryGetter interface {
+	GetObjectWithQuery(ctx context.Context, key string, query string) (io.ReadCloser, error)
+}
+
 // ErrBucketNotFound 桶不存在
 var ErrBucketNotFound = errors.New("bucket not found")
 

@@ -89,6 +89,32 @@ func init() {
 	}
 }
 
+// debugTransport 包装 http.RoundTripper，输出每次请求/响应的完整 headers。
+type debugTransport struct {
+	base http.RoundTripper
+}
+
+func (t *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	log.Printf("[objstore] DEBUG HTTP >>> %s %s", req.Method, req.URL.String())
+	for k, vs := range req.Header {
+		for _, v := range vs {
+			log.Printf("[objstore] DEBUG HTTP >>>   %s: %s", k, v)
+		}
+	}
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		log.Printf("[objstore] DEBUG HTTP <<< error: %v", err)
+		return nil, err
+	}
+	log.Printf("[objstore] DEBUG HTTP <<< %s", resp.Status)
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			log.Printf("[objstore] DEBUG HTTP <<<   %s: %s", k, v)
+		}
+	}
+	return resp, nil
+}
+
 func newCOSStore(cfg Config) (Store, error) {
 	host := cosHost(cfg.Region, cfg.Endpoint)
 	u, err := url.Parse(fmt.Sprintf("https://%s.%s", cfg.Bucket, host))
@@ -98,15 +124,20 @@ func newCOSStore(cfg Config) (Store, error) {
 	if COSDebug {
 		log.Printf("[objstore] DEBUG New COS Client: endpoint=%s", u.String())
 	}
+	baseTransport := &http.Transport{
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	var transport http.RoundTripper = baseTransport
+	if cfg.DebugHTTPRequests {
+		transport = &debugTransport{base: transport}
+	}
 	inner := cos.NewClient(&cos.BaseURL{BucketURL: u}, &http.Client{
 		Transport: &cos.AuthorizationTransport{
 			SecretID:  cfg.SecretID,
 			SecretKey: cfg.SecretKey,
-			Transport: &http.Transport{
-				MaxIdleConns:        200,
-				MaxIdleConnsPerHost: 100,
-				IdleConnTimeout:     90 * time.Second,
-			},
+			Transport: transport,
 		},
 	})
 	var ssec *sseCustomerKey
@@ -599,6 +630,18 @@ func (c *cosStore) GetAll(ctx context.Context, key string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
+}
+
+// GetObjectWithQuery 带自定义 query string 下载对象（如 CI 图片处理参数）。
+// query 不含前导 "?"，直接拼到 GET 请求的 query string 后。
+func (c *cosStore) GetObjectWithQuery(ctx context.Context, key string, query string) (io.ReadCloser, error) {
+	c.logOperation("GetObjectWithQuery", key, fmt.Sprintf("query=%s", query))
+	opt := c.applySSECGet(nil)
+	resp, err := c.inner.CI.Get(ctx, key, query, opt)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
 }
 
 // ---- 上传 ----

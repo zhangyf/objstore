@@ -47,6 +47,10 @@ type Config struct {
 	//
 	// 注意：SSE-C 要求 HTTPS（COS/S3 均强制）。
 	SSECustomerKey []byte
+
+	// DebugHTTPRequests 设为 true 时，底层 HTTP transport 为每个请求/响应打印完整 headers。
+	// 仅 COS 生效（S3 SDK 自带 logger 体系）。默认 false。
+	DebugHTTPRequests bool
 }
 
 // New 根据 Config 创建对应的 Store 实现
