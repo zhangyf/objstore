@@ -4,6 +4,17 @@
 
 > Unified object storage client for COS and S3.
 
+## 版本策略
+
+自 **v1.0.0** 起，`Store` 接口锁定，承诺 API 向后兼容：
+
+- **`Store` 接口**所有方法签名稳定，不删除、不改返回值类型。
+- 新增能力全部通过**可选接口（Optional Interface）**扩展，调用方类型断言获取。
+- 新增结构体字段遵循零值向后兼容（零值 = 旧行为）。
+- 所有 breaking change 记录在 [CHANGELOG.md](./CHANGELOG.md)。
+
+v0.x 时期存在若干破坏性变更，详见 CHANGELOG。
+
 ## 特性
 
 - ✅ **统一接口**：`Store` 接口屏蔽 COS / S3 差异，一套代码同时支持两种后端
@@ -13,7 +24,7 @@
 - ✅ **断点续传**：`MultipartResumer` 接口，合作 InitMultipart / ListParts / UploadPartN / CompleteMultipart / AbortMultipart 完成可恢复分块上传
 - ✅ **孤儿扫描与 abort**：`MultipartLister.ListIncompleteUploads` 拿云端未完成 multipart uploads 全量列表（自动分页）。[v0.11.0]
 - ✅ **对象属性透传**：`OptionalUploader` + `PutOptions` 透传 ContentType / CacheControl / Metadata / StorageClass / ACL / Tags。[v0.10.0]
-- ✅ **内网优化**：COS 默认使用 `cos-internal.<region>.tencentcos.cn` 域名，走腾讯云内网链路
+- ✅ **Endpoint 可配**：COS 默认走公网域名，可通过 `Config.Endpoint` 指定内网域名走腾讯云内网链路
 - ✅ **S3 兼容**：通过 `Endpoint` 字段可对接任意 S3 兼容存储（MinIO 等），自动启用 path-style
 - ✅ **预签名 URL**：内置 GET / PUT 预签名，临时分发上传/下载无需暴露密钥
 - ✅ **可选调试日志**：通过 `OBJSTORE_DEBUG` / `COS_DEBUG` 环境变量或 `SetDebug()` 开启详细操作日志
@@ -91,15 +102,15 @@ store, _ := objstore.New(objstore.Config{
 |---|---|
 | `objstore.New(Config)` | 工厂函数，按 `Provider` 字段返回对应实现 |
 | `Config.Provider` | 支持 `ProviderCOS` / `ProviderS3` |
-| `Config.Endpoint` | S3 模式下可指定自定义 endpoint，自动启用 path-style，对接 MinIO 等 S3 兼容存储 |
-| 内网域名 | COS 默认使用 `<bucket>.cos-internal.<region>.tencentcos.cn` |
+| `Config.Endpoint` | 指定自定义 endpoint；COS 侧可配内网域名 `cos-internal.<region>.tencentcos.cn`；S3 侧自动启用 path-style |
+| 内网域名 | COS 使用公网域名 `<bucket>.cos.<region>.myqcloud.com`，通过 `Config.Endpoint` 可切换为 `cos-internal.<region>.tencentcos.cn` |
 | 连接池 | COS 客户端预设 `MaxIdleConns=200`、`MaxIdleConnsPerHost=100`、`IdleConnTimeout=90s` |
 
 ### 2. 元信息操作
 
 | 方法 | COS | S3 | 说明 |
 |---|:---:|:---:|---|
-| `HeadObject(ctx, key) (int64, error)` | ✅ | ✅ | 获取对象大小 |
+| `HeadObject(ctx, key) (*ObjectInfo, error)` | ✅ | ✅ | 获取对象元信息（Size/ETag/ContentType/SSE/Metadata 等） |
 | `ListObjects(ctx, ListOptions) ([]ObjectInfo, error)` | ✅ | ✅ | 列出对象（含 Size），通过 `ListOptions` 控制分层/递归 |
 | `BucketName() string` | ✅ | ✅ | 返回桶名（用于日志） |
 | `Provider() ProviderType` | ✅ | ✅ | 返回存储类型 |
@@ -236,7 +247,46 @@ if lister, ok := store.(objstore.MultipartLister); ok {
 }
 ```
 
-### 10. 调试日志
+### 10. 桶管理（BucketAdmin，v0.15.0）
+
+通过类型断言获取桶创建/删除/探测能力：
+
+```go
+if admin, ok := store.(objstore.BucketAdmin); ok {
+    if err := admin.CreateBucket(ctx); err != nil {
+        if errors.Is(err, objstore.ErrBucketAlreadyOwnedByYou) {
+            // 桶已存在且属于你
+        }
+    }
+    // HeadBucket 检查桶是否存在
+    if err := admin.HeadBucket(ctx); err != nil {
+        if errors.Is(err, objstore.ErrBucketNotFound) {
+            // 桶不存在
+        }
+    }
+}
+```
+
+#### BucketAdminOpt（v1.0.0）：带选项的桶创建
+
+```go
+if adminOpt, ok := store.(objstore.BucketAdminOpt); ok {
+    err := adminOpt.CreateBucketOpt(ctx, &objstore.CreateBucketOptions{
+        OFS: true,    // COS: 创建元数据加速桶
+        MAZ: true,    // COS: 多 AZ 桶
+        ACL: "private",
+    })
+}
+```
+
+| 选项 | COS | S3 | 说明 |
+|---|:---:|:---:|---|
+| `OFS` | ✅ | — | 创建元数据加速桶，对应 `BucketArchConfig: "OFS"` |
+| `MAZ` | ✅ | — | 创建多 AZ 桶，对应 `BucketAZConfig: "MAZ"` |
+| `ACL` | ✅ | ✅ | Canned ACL |
+| `Tags` | ✅ | — | 桶标签（S3 不支持 CreateBucket 时设标签） |
+
+### 11. 调试日志
 
 通过环境变量或 API 开启详细操作日志（请求 URL、bucket、region、key 等）：
 
@@ -259,13 +309,14 @@ objstore.SetDebug(true)
 
 ```go
 type ListOptions struct {
-    Prefix    string // 前缀路径
-    Delimiter string // 分隔符，默认 "/"（当前层）；传 "" 则递归列出所有对象
+    Prefix          string // 前缀路径
+    Delimiter       string // 分隔符，默认 "/"（当前层）；传 "" 则递归列出所有对象
+    ListConcurrency int    // 列表并行度：0 = 串行（默认），>0 = 遍历子前缀时的 goroutine 数 [v1.0.0]
 }
 
 type Store interface {
     // 元信息
-    HeadObject(ctx context.Context, key string) (int64, error)
+    HeadObject(ctx context.Context, key string) (*ObjectInfo, error)
     ListObjects(ctx context.Context, opts ListOptions) ([]ObjectInfo, error)
 
     // 下载
@@ -338,6 +389,25 @@ type OptionalUploader interface {
     InitMultipartOpt(ctx context.Context, key string, opts *PutOptions) (uploadID string, err error)
     MultipartUploadOpt(ctx context.Context, key string, totalSize, chunkSize int64,
         concurrency int, fetchPart func(int, int64, int64) ([]byte, error), opts *PutOptions) error
+}
+
+// BucketAdmin 桶级别管理接口（v0.15.0）。COS / S3 均实现。
+type BucketAdmin interface {
+    CreateBucket(ctx context.Context) error
+    DeleteBucket(ctx context.Context) error
+    HeadBucket(ctx context.Context) error
+}
+
+// BucketAdminOpt 带选项的桶创建（v1.0.0）。
+type CreateBucketOptions struct {
+    ACL  string            // canned ACL
+    Tags map[string]string // 仅 COS 支持；S3 忽略
+    OFS  bool              // 仅 COS：BucketArchConfig="OFS"
+    MAZ  bool              // 仅 COS：BucketAZConfig="MAZ"
+}
+
+type BucketAdminOpt interface {
+    CreateBucketOpt(ctx context.Context, opts *CreateBucketOptions) error
 }
 ```
 

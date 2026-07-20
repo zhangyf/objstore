@@ -27,6 +27,11 @@ type ObjectInfo struct {
 type ListOptions struct {
 	Prefix    string // 前缀路径
 	Delimiter string // 分隔符，默认 "/"；传 "" 则递归列出所有对象（不分组）
+
+	// ListConcurrency 递归列举时并发遍历子前缀的 goroutine 数。
+	// 0 或 1 = 串行（默认）；>1 = 仅顶层子前缀并行，递归子层恢复串行。
+	// 仅 COS 递归模式（Delimiter=""）生效；S3 的 ListObjectsV2 原生就返回全量无需遍历。
+	ListConcurrency int
 }
 
 // PutOptions 上传/初始化 multipart 时可选的对象属性。
@@ -214,6 +219,44 @@ type BucketAdmin interface {
 	// HeadBucket 检查桶是否存在且可访问。
 	// 存在 返回 nil；不存在返回 ErrBucketNotFound；其他错误原样返回。
 	HeadBucket(ctx context.Context) error
+}
+
+// CreateBucketOptions 创建桶时的可选参数。
+// 字段按 provider 各取所需：COS 支持 OFS/MAZ/ACL/Tags；S3 仅 ACL 直接映射（OFS/MAZ 忽略）。
+type CreateBucketOptions struct {
+	// Canned ACL。COS 与 S3 支持的 canned 值不同，调用方负责按 provider 校验。
+	//   COS (4): default | private | public-read | public-read-write
+	//   S3 (7): private | public-read | public-read-write | authenticated-read |
+	//           aws-exec-read | bucket-owner-read | bucket-owner-full-control
+	ACL string
+
+	// Tags 桶标签（key=value，URL-safe）。
+	// COS 通过 x-cos-tagging header 传入创建请求；S3 的 CreateBucket 不支持桶标签，
+	// 需要创建后单独调 PutBucketTagging，因此 S3 忽略此字段。
+	Tags map[string]string
+
+	// OFS 仅 COS 生效：设为 true 时创建元数据加速桶（BucketArchConfig="OFS"）。
+	// S3 忽略。
+	OFS bool
+
+	// MAZ 仅 COS 生效：设为 true 时创建多 AZ 桶（BucketAZConfig="MAZ"）。
+	// S3 忽略。
+	MAZ bool
+}
+
+// HasAny 返回是否设置了任意一项。
+func (o *CreateBucketOptions) HasAny() bool {
+	if o == nil {
+		return false
+	}
+	return o.ACL != "" || len(o.Tags) > 0 || o.OFS || o.MAZ
+}
+
+// BucketAdminOpt 可选的桶创建扩展接口。
+// COS / S3 均实现。调用方通过类型断言检测。
+// 当 opts 为 nil 时等价于调用 CreateBucket。
+type BucketAdminOpt interface {
+	CreateBucketOpt(ctx context.Context, opts *CreateBucketOptions) error
 }
 
 // ErrBucketNotFound 桶不存在

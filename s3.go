@@ -157,13 +157,25 @@ func (s *s3Store) applySSECUploadPartCopy(in *s3.UploadPartCopyInput, srcStore *
 
 // ---- BucketAdmin ----
 
-// CreateBucket 创建当前桶。主要区域 us-east-1 不能指定 LocationConstraint。
+// CreateBucket 创建当前桶（无选项），委托到 CreateBucketOpt(nil)。
 func (s *s3Store) CreateBucket(ctx context.Context) error {
+	return s.CreateBucketOpt(ctx, nil)
+}
+
+// CreateBucketOpt 创建当前桶，支持 ACL 等选项。
+// OFS / MAZ / Tags 在 S3 无对应概念或需单独 API，S3 侧忽略。
+func (s *s3Store) CreateBucketOpt(ctx context.Context, opts *CreateBucketOptions) error {
 	input := &s3.CreateBucketInput{Bucket: aws.String(s.bucket)}
 	if s.region != "" && s.region != "us-east-1" {
 		input.CreateBucketConfiguration = &s3types.CreateBucketConfiguration{
 			LocationConstraint: s3types.BucketLocationConstraint(s.region),
 		}
+	}
+	if opts.HasAny() {
+		if opts.ACL != "" {
+			input.ACL = s3types.BucketCannedACL(opts.ACL)
+		}
+		// OFS / MAZ / Tags — S3 不适用或被忽略。
 	}
 	_, err := s.inner.CreateBucket(ctx, input)
 	if err == nil {

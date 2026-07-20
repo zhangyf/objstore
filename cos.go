@@ -243,10 +243,34 @@ func (c *cosStore) copyPartOptWithSSEC(srcStore *cosStore, opt *cos.ObjectCopyPa
 
 // ---- BucketAdmin ----
 
-// CreateBucket 创建当前桶
+// CreateBucket 创建当前桶（无选项），委托到 CreateBucketOpt(nil)。
 func (c *cosStore) CreateBucket(ctx context.Context) error {
-	c.logOperation("CreateBucket", "")
-	resp, err := c.inner.Bucket.Put(ctx, nil)
+	return c.CreateBucketOpt(ctx, nil)
+}
+
+// CreateBucketOpt 创建当前桶，支持 OFS / MAZ / ACL / Tags 等选项。
+// COS 的 CreateBucketConfiguration 中 BucketArchConfig / BucketAZConfig 分别映射 OFS / MAZ。
+func (c *cosStore) CreateBucketOpt(ctx context.Context, opts *CreateBucketOptions) error {
+	c.logOperation("CreateBucketOpt", "")
+	var putOpt *cos.BucketPutOptions
+	if opts.HasAny() {
+		putOpt = &cos.BucketPutOptions{
+			CreateBucketConfiguration: &cos.CreateBucketConfiguration{},
+		}
+		if opts.OFS {
+			putOpt.CreateBucketConfiguration.BucketArchConfig = "OFS"
+		}
+		if opts.MAZ {
+			putOpt.CreateBucketConfiguration.BucketAZConfig = "MAZ"
+		}
+		if opts.ACL != "" {
+			putOpt.XCosACL = opts.ACL
+		}
+		if len(opts.Tags) > 0 {
+			putOpt.XCosTagging = encodeTagging(opts.Tags)
+		}
+	}
+	resp, err := c.inner.Bucket.Put(ctx, putOpt)
 	if err == nil {
 		return nil
 	}
@@ -319,7 +343,7 @@ func (c *cosStore) ListObjects(ctx context.Context, opts ListOptions) ([]ObjectI
 	c.logOperation("ListObjects", "", fmt.Sprintf("prefix=%s delimiter=%q", opts.Prefix, opts.Delimiter))
 
 	if opts.Delimiter == "" {
-		return c.listAllObjects(ctx, opts.Prefix)
+		return c.listAllObjects(ctx, opts.Prefix, opts.ListConcurrency)
 	}
 
 	return c.listWithDelimiter(ctx, opts.Prefix, opts.Delimiter)
@@ -381,8 +405,9 @@ func (c *cosStore) listWithDelimiter(ctx context.Context, prefix string, delimit
 	return result, nil
 }
 
-// listAllObjects 递归列出前缀下所有对象（遍历 CommonPrefixes）
-func (c *cosStore) listAllObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+// listAllObjects 递归列出前缀下所有对象（遍历 CommonPrefixes）。
+// concurrency <= 1 时串行；>1 时对顶层子前缀并行遍历，深层回退串行。
+func (c *cosStore) listAllObjects(ctx context.Context, prefix string, concurrency int) ([]ObjectInfo, error) {
 	var result []ObjectInfo
 	var prefixes []string
 	var err error
@@ -392,16 +417,50 @@ func (c *cosStore) listAllObjects(ctx context.Context, prefix string) ([]ObjectI
 	if err != nil {
 		return nil, err
 	}
-
-	// 递归遍历每个子目录
-	for _, subPrefix := range prefixes {
-		subResult, err := c.listAllObjects(ctx, subPrefix)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, subResult...)
+	if len(prefixes) == 0 {
+		return result, nil
 	}
 
+	// 串行路径
+	if concurrency <= 1 {
+		for _, subPrefix := range prefixes {
+			subResult, err := c.listAllObjects(ctx, subPrefix, 0)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, subResult...)
+		}
+		return result, nil
+	}
+
+	// 并行路径：仅这一层并行，递归子层恢复串行（concurrency=0）
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	for _, sp := range prefixes {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(p string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			sub, err := c.listAllObjects(ctx, p, 0)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return
+			}
+			result = append(result, sub...)
+		}(sp)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
 	return result, nil
 }
 
