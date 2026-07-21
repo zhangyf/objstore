@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [1.0.1] - 2026-07-21
+
+### Added
+
+- `ObjectQueryGetter` 可选接口：`GetObjectWithQuery(ctx, key, query)` 带自定义 query string 下载对象，用于 COS 数据万象（CI）图片处理等场景（仅 COS 实现，S3 不支持）。
+- `Config.DebugHTTPRequests` 字段：设为 true 时底层 HTTP transport 打印每次请求/响应的完整 headers（仅 COS，零值 false = 旧行为）。
+
+### 兼容性
+
+- 完全向后兼容。`Store` 接口未变；新增字段零值兼容；新接口走可选接口模式，旧调用方无感。
+
+---
+
 ## [1.0.0] - 2026-07-20
 
 ### 版本策略声明
