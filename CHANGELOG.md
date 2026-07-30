@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Fixed
+
+- `GetObjectWithQuery`：含 `=` 的 key=value 型 query（如 `ci-process=videoinfo`）改用 `Object.Get` + `CiProcess` option，避免 COS SDK `CI.Get` 的 `encodeURIComponent` 将 `=` 编码为 `%3D` 导致服务端不识别。
+
+---
+
 ## [1.0.1] - 2026-07-21
 
 ### Added

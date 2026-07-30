@@ -634,8 +634,29 @@ func (c *cosStore) GetAll(ctx context.Context, key string) ([]byte, error) {
 
 // GetObjectWithQuery 带自定义 query string 下载对象（如 CI 图片处理参数）。
 // query 不含前导 "?"，直接拼到 GET 请求的 query string 后。
+//
+// 注意：COS SDK 的 CI.Get 会 encodeURIComponent 整个 query string，
+// 导致 ci-process=videoinfo 中的 "=" 被编码为 "%3D"，服务端不识别。
+// 对含 "=" 的 key=value 型 query，改用 Object.Get + CiProcess option。
 func (c *cosStore) GetObjectWithQuery(ctx context.Context, key string, query string) (io.ReadCloser, error) {
 	c.logOperation("GetObjectWithQuery", key, fmt.Sprintf("query=%s", query))
+
+	// 含 "=" 的 key=value 型 query（如 ci-process=videoinfo）：
+	// SDK 的 CI.Get 会编码 = 导致服务端不识别，改用 Object.Get + CiProcess。
+	if strings.Contains(query, "=") {
+		kv := strings.SplitN(query, "=", 2)
+		if kv[0] == "ci-process" {
+			opt := c.applySSECGet(&cos.ObjectGetOptions{})
+			opt.CiProcess = kv[1]
+			resp, err := c.inner.Object.Get(ctx, key, opt)
+			if err != nil {
+				return nil, err
+			}
+			return resp.Body, nil
+		}
+	}
+
+	// 无 "=" 的简名单词（如 imageInfo），继续走 CI.Get。
 	opt := c.applySSECGet(nil)
 	resp, err := c.inner.CI.Get(ctx, key, query, opt)
 	if err != nil {
