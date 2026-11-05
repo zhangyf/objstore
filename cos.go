@@ -20,13 +20,14 @@ import (
 )
 
 type cosStore struct {
-	inner     *cos.Client
-	bucket    string
-	region    string
-	host      string // COS 域名后缀，如 cos.ap-tokyo.myqcloud.com（不含 bucket 前缀）
-	secretID  string
-	secretKey string
-	ssec      *sseCustomerKey // SSE-C 客户密钥，nil 表示未启用
+	inner         *cos.Client
+	bucket        string
+	region        string
+	host          string // COS 域名后缀，如 cos.ap-tokyo.myqcloud.com（不含 bucket 前缀）
+	secretID      string
+	secretKey     string
+	ssec          *sseCustomerKey // SSE-C 客户密钥，nil 表示未启用
+	metaInsightOK bool            // 是否成功构造出 MetaInsightURL（决定 DocSearcher 是否可用）
 }
 
 // cosHost 计算 COS 域名后缀（不含 bucket）。
@@ -133,7 +134,21 @@ func newCOSStore(cfg Config) (Store, error) {
 	if cfg.DebugHTTPRequests {
 		transport = &debugTransport{base: transport}
 	}
-	inner := cos.NewClient(&cos.BaseURL{BucketURL: u}, &http.Client{
+
+	// MetaInsight（智能检索）走独立的 CI 域名 <AppId>.ci.<region>.myqcloud.com。
+	// 与 BucketURL 同时设置是 SDK 官方 example 的用法：普通对象操作仍用 BucketURL，
+	// 不受影响；只有 MetaInsight 请求才用 MetaInsightURL。
+	// 解析不出 AppId 时不设置（metaInsightOK=false），保证零值兼容、老调用方无感。
+	base := &cos.BaseURL{BucketURL: u}
+	metaInsightOK := false
+	if appID := resolveMetaInsightAppID(cfg); appID != "" {
+		if mi := metaInsightBaseURL(appID, cfg.Region); mi != nil {
+			base.MetaInsightURL = mi
+			metaInsightOK = true
+		}
+	}
+
+	inner := cos.NewClient(base, &http.Client{
 		Transport: &cos.AuthorizationTransport{
 			SecretID:  cfg.SecretID,
 			SecretKey: cfg.SecretKey,
@@ -144,7 +159,7 @@ func newCOSStore(cfg Config) (Store, error) {
 	if len(cfg.SSECustomerKey) == 32 {
 		ssec = newSSECustomerKey(cfg.SSECustomerKey)
 	}
-	return &cosStore{inner: inner, bucket: cfg.Bucket, region: cfg.Region, host: host, secretID: cfg.SecretID, secretKey: cfg.SecretKey, ssec: ssec}, nil
+	return &cosStore{inner: inner, bucket: cfg.Bucket, region: cfg.Region, host: host, secretID: cfg.SecretID, secretKey: cfg.SecretKey, ssec: ssec, metaInsightOK: metaInsightOK}, nil
 }
 
 func (c *cosStore) Provider() ProviderType { return ProviderCOS }
