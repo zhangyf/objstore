@@ -305,6 +305,33 @@ objstore.SetDebug(true)
 [objstore] DEBUG [COS multipart] part 3/12 done
 ```
 
+### 12. 文档语义检索（`DocSearcher` 接口，仅 COS）
+
+对应 COS 数据万象「智能检索 / MetaInsight」的**文档检索**（`hybridsearch` + `DocSearch` 模板）。
+在控制台建好数据集、绑定 `Official:DocSearch` 模板并索引完成后，用自然语言即可检索 md/txt 等文档：
+
+```go
+ds, ok := store.(objstore.DocSearcher) // 仅 COS 实现；S3 返回 false
+if !ok {
+    // 降级：非 COS provider
+}
+hits, err := ds.DocSearch(ctx, objstore.DocSearchQuery{
+    DatasetName:    "my-doc-dataset",
+    SearchText:     "は 和 が 的区别", // 中文描述也能命中日文文档
+    Limit:          10,
+    MatchThreshold: 50, // 官方推荐 80 对中文描述类查询偏高，实测 50 更平衡
+})
+for _, h := range hits {
+    // h.URI 形如 cos://bucket/knowledge/xxx_第16课知识点.md，可据此定位原文
+    fmt.Println(h.Score, h.URI, h.Text)
+}
+```
+
+- 凭证复用构造 Store 时的 `SecretID/SecretKey`，无需额外配置；AppId 默认从 `Bucket` 尾号自动解析，
+  桶名不含尾号时可显式设 `Config.MetaInsightAppID`。
+- 入参 `DocSearchQuery`、返回 `DocHit` 均为 objstore 自有类型，**调用方无需 import `cos-go-sdk-v5`**。
+- `SearchText` 最多 60 个 UTF-8 字符；`Limit` 取值 (0, 100]；返回的 `Text` 可能含 `{Image_0}` 占位符。
+
 ## 接口总览
 
 ```go
@@ -408,6 +435,32 @@ type CreateBucketOptions struct {
 
 type BucketAdminOpt interface {
     CreateBucketOpt(ctx context.Context, opts *CreateBucketOptions) error
+}
+
+// ObjectQueryGetter 带自定义 query string 下载对象（仅 COS，v1.0.1）。
+type ObjectQueryGetter interface {
+    GetObjectWithQuery(ctx context.Context, key string, query string) (io.ReadCloser, error)
+}
+
+// DocSearcher 文档语义检索（智能检索 MetaInsight，仅 COS）。
+type DocSearchQuery struct {
+    DatasetName    string                 // 必填
+    SearchText     string                 // 必填，≤60 UTF-8 字符
+    Limit          int                    // (0,100]
+    MatchThreshold int                    // (0,100]
+    Filter         map[string]interface{} // 可选
+}
+
+type DocHit struct {
+    URI       string
+    Text      string
+    Score     int
+    TextPage  int
+    ImageUrls map[string]string
+}
+
+type DocSearcher interface {
+    DocSearch(ctx context.Context, q DocSearchQuery) ([]DocHit, error)
 }
 ```
 

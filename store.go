@@ -267,6 +267,53 @@ type ObjectQueryGetter interface {
 	GetObjectWithQuery(ctx context.Context, key string, query string) (io.ReadCloser, error)
 }
 
+// DocSearchQuery 文档语义检索请求（对应 COS 智能检索 MetaInsight 的文档检索）。
+// 字段刻意与底层 SDK 解耦，调用方无需 import cos-go-sdk-v5。
+type DocSearchQuery struct {
+	// DatasetName 数据集名称，同一账户下唯一。必填。
+	DatasetName string
+	// SearchText 检索语句，最多 60 个 UTF-8 字符。支持中文自然语言描述，
+	// 如「は 和 が 的区别」。必填。
+	SearchText string
+	// Limit 返回条数，(0, 100]，0 表示用服务端默认值（10）。
+	Limit int
+	// MatchThreshold 最低相关度分数，(0, 100]，0 表示不过滤。
+	// 注意：官方推荐值 80 对中文描述类查询偏高，实测 50 更平衡。
+	MatchThreshold int
+	// Filter 可选的标量过滤条件（MongoDB 风格，最多 3 个条件）。
+	Filter map[string]interface{}
+}
+
+// DocHit 一条文档检索命中。
+type DocHit struct {
+	// URI 命中文档的对象标识，格式 cos://<Bucket>/<Key>。
+	URI string
+	// Text 命中的原文片段（可能含 {Image_0} 之类的图片占位符）。
+	Text string
+	// Score 相关度评分，越高越相关。
+	Score int
+	// TextPage 命中内容所在页码（仅部分结果包含，0 表示无）。
+	TextPage int
+	// ImageUrls 图片占位符到实际图片标识/URL 的映射。
+	ImageUrls map[string]string
+}
+
+// DocSearcher 可选接口：COS 数据万象「智能检索 / MetaInsight」的文档语义检索
+// （hybridsearch，DocSearch 模板）。调用方通过类型断言检测：
+//
+//	ds, ok := store.(objstore.DocSearcher)
+//	if !ok { /* 非 COS 或未配置，降级 */ }
+//	hits, err := ds.DocSearch(ctx, objstore.DocSearchQuery{...})
+//
+// 仅 COS 实现；S3 不支持此能力。凭证复用 Store 初始化时的 SecretID/SecretKey。
+type DocSearcher interface {
+	DocSearch(ctx context.Context, q DocSearchQuery) ([]DocHit, error)
+}
+
+// ErrMetaInsightUnavailable 表示当前 Store 不支持文档检索：
+// 非 COS provider、或桶名/配置里解析不出 MetaInsight AppId。
+var ErrMetaInsightUnavailable = errors.New("meta insight doc search unavailable: cos provider with resolvable appid required")
+
 // ErrBucketNotFound 桶不存在
 var ErrBucketNotFound = errors.New("bucket not found")
 

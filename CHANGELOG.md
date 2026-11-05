@@ -7,6 +7,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `DocSearcher` 可选接口：COS 数据万象「智能检索 / MetaInsight」的**文档语义检索**（`hybridsearch` + `DocSearch` 模板）。`DocSearch(ctx, DocSearchQuery) ([]DocHit, error)`，入参/返回均为 objstore 自有类型，调用方无需 import `cos-go-sdk-v5`。仅 COS 实现，S3 不支持；凭证复用 Store 初始化时的 SecretID/SecretKey。
+- `Config.MetaInsightAppID` 可选字段：桶名不带 `-<AppId>` 尾号（或自定义域名）时显式指定，留空自动从 `Bucket` 解析。零值兼容，不影响任何既有对象操作。
+- `cos-go-sdk-v5` 由 `v0.7.73` 升至 **`v0.7.76`**（`HybridSearch` 自 v0.7.74 引入），由 indirect 提为 direct。
+
 ### Fixed
 
 - `GetObjectWithQuery`：含 `=` 的 key=value 型 query（如 `ci-process=videoinfo`）改用 `Object.Get` + `CiProcess` option，避免 COS SDK `CI.Get` 的 `encodeURIComponent` 将 `=` 编码为 `%3D` 导致服务端不识别。

@@ -51,6 +51,14 @@ type Config struct {
 	// DebugHTTPRequests 设为 true 时，底层 HTTP transport 为每个请求/响应打印完整 headers。
 	// 仅 COS 生效（S3 SDK 自带 logger 体系）。默认 false。
 	DebugHTTPRequests bool
+
+	// MetaInsightAppID 是 COS 数据万象「智能检索 / MetaInsight」的 AppId（桶名尾号数字）。
+	//
+	// 仅 COS 生效，且仅在使用 DocSearcher 可选接口时需要。留空时自动从 Bucket 解析：
+	// COS 桶名形如 "<name>-<AppId>"（如 openclaw-backup-tx-1251036673 → 1251036673）。
+	// 只有当桶名不含尾号数字、或使用了不带 AppId 的自定义域名时，才需要显式指定。
+	// 零值完全兼容：不设置不影响任何既有对象存储操作。
+	MetaInsightAppID string
 }
 
 // New 根据 Config 创建对应的 Store 实现
